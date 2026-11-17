@@ -1,0 +1,51 @@
+name: Build APK
+ 
+on:
+  push:
+  workflow_dispatch:
+ 
+permissions:
+  contents: write
+ 
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+ 
+      - name: 解压 project.zip（如果有）
+        run: |
+          if [ -f project.zip ]; then
+            rm -rf proj && mkdir proj && unzip -q project.zip -d proj
+            f=$(find proj -maxdepth 3 -name settings.gradle.kts | head -n1)
+            if [ -z "$f" ]; then echo "project.zip 里没有 settings.gradle.kts"; exit 1; fi
+            echo "PROJ=$(dirname "$f")" >> "$GITHUB_ENV"
+          else
+            echo "PROJ=." >> "$GITHUB_ENV"
+          fi
+ 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+ 
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+ 
+      - name: 构建
+        run: |
+          cd "$PROJ"
+          gradle --no-daemon assembleDebug --stacktrace
+ 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phone-share-apk
+          path: ${{ env.PROJ }}/app/build/outputs/apk/debug/*.apk
+ 
+      - name: 发布到 Release（手机上可以直接点开下载）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: APK 构建 ${{ github.run_number }}
+          files: ${{ env.PROJ }}/app/build/outputs/apk/debug/*.apk
