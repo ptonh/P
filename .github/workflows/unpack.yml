@@ -1,0 +1,43 @@
+name: Unpack project.zip
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 展开 zip 并提交
+        run: |
+          z=$(find . -maxdepth 3 -name '*.zip' -not -path './.git/*' | sort | head -n1)
+          if [ -z "$z" ]; then
+            echo "错误：仓库里没有 zip 文件，请先上传 project.zip"
+            exit 1
+          fi
+          echo "展开 $z"
+          rm -rf /tmp/up && mkdir /tmp/up && unzip -q "$z" -d /tmp/up
+          f=$(find /tmp/up -maxdepth 4 -name settings.gradle.kts | head -n1)
+          if [ -z "$f" ]; then
+            echo "错误：zip 里没有 settings.gradle.kts，zip 里的内容："
+            find /tmp/up -maxdepth 4 | head -40
+            exit 1
+          fi
+          src=$(dirname "$f")
+          cp -r "$src"/. .
+          rm -f "$z"
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "没有变化"
+          else
+            git commit -m "展开项目文件"
+            git push
+          fi
+          echo "展开后的文件："
+          find . -maxdepth 6 -type f -not -path './.git/*' | sort | head -60
