@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="control_service_desc">用于接收网页端发来的远程控制指令（点击、滑动、返回、主页等）。只有你在手机上看到配对码并由对方输入正确后才会执行。</string>
+</resources>
