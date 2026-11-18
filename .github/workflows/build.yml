@@ -1,48 +1,60 @@
 name: Build APK
- 
+
 on:
   push:
   workflow_dispatch:
- 
+
 permissions:
   contents: write
- 
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
- 
-      - name: 解压 project.zip（如果有）
+
+      - name: 找到安卓项目（直接在仓库里，或在 zip 里）
         run: |
-          if [ -f project.zip ]; then
-            rm -rf proj && mkdir proj && unzip -q project.zip -d proj
-            f=$(find proj -maxdepth 3 -name settings.gradle.kts | head -n1)
-            if [ -z "$f" ]; then echo "project.zip 里没有 settings.gradle.kts"; exit 1; fi
-            echo "PROJ=$(dirname "$f")" >> "$GITHUB_ENV"
-          else
-            echo "PROJ=." >> "$GITHUB_ENV"
+          echo "仓库里的文件："
+          find . -maxdepth 3 -not -path './.git/*' -not -path './.git' | sort | head -60
+          f=$(find . -maxdepth 4 -name settings.gradle.kts | head -n1)
+          if [ -z "$f" ]; then
+            z=$(find . -maxdepth 3 -name '*.zip' | sort | head -n1)
+            if [ -z "$z" ]; then
+              echo "错误：仓库里没有 settings.gradle.kts，也没有 zip 文件，请先上传 project.zip"
+              exit 1
+            fi
+            echo "解压 $z"
+            rm -rf proj && mkdir proj && unzip -q "$z" -d proj
+            f=$(find proj -maxdepth 4 -name settings.gradle.kts | head -n1)
+            if [ -z "$f" ]; then
+              echo "错误：zip 里没有 settings.gradle.kts，zip 里的内容："
+              find proj -maxdepth 4 | head -40
+              exit 1
+            fi
           fi
- 
+          echo "安卓项目目录：$(dirname "$f")"
+          echo "PROJ=$(dirname "$f")" >> "$GITHUB_ENV"
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
- 
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
- 
+
       - name: 构建
         run: |
           cd "$PROJ"
           gradle --no-daemon assembleDebug --stacktrace
- 
+
       - uses: actions/upload-artifact@v4
         with:
           name: phone-share-apk
           path: ${{ env.PROJ }}/app/build/outputs/apk/debug/*.apk
- 
+
       - name: 发布到 Release（手机上可以直接点开下载）
         uses: softprops/action-gh-release@v2
         with:
