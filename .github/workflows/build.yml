@@ -36,6 +36,16 @@ jobs:
           echo "安卓项目目录：$(dirname "$f")"
           echo "PROJ=$(dirname "$f")" >> "$GITHUB_ENV"
 
+      - name: 应用 overlay（仓库里 overlay/ 下的文件，覆盖项目里同路径的文件）
+        run: |
+          if [ -d overlay ]; then
+            echo "应用 overlay 文件："
+            find overlay -type f | sort
+            cp -r overlay/. "$PROJ"/
+          else
+            echo "没有 overlay 目录，跳过"
+          fi
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
