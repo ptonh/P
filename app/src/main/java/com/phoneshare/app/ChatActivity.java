@@ -123,6 +123,7 @@ public class ChatActivity extends Activity {
     private WebView webView;
     private AppChrome chrome;
     private SharedPreferences prefs;
+    private ShareBridge shareBridge;
 
     private String chatUrl = "";
     private String chatHost = "";
@@ -217,6 +218,7 @@ public class ChatActivity extends Activity {
     protected void onPause() {
         super.onPause();
         resumed = false;
+        // 共享期间不要 webView.onPause，避免采集/桥事件中断
         if (Build.VERSION.SDK_INT >= 21) {
             android.webkit.CookieManager.getInstance().flush();
         }
@@ -380,6 +382,22 @@ public class ChatActivity extends Activity {
         }
 
         webView.addJavascriptInterface(new HostBridge(), "HostBridge");
+        shareBridge = new ShareBridge(this, webView, new ShareBridge.HostsProvider() {
+            @Override
+            public java.util.Set<String> allowedHosts() {
+                java.util.HashSet<String> s = new java.util.HashSet<String>();
+                if (chatHost.length() > 0) s.add(chatHost);
+                if (videoHost.length() > 0) s.add(videoHost);
+                return s;
+            }
+        });
+        webView.addJavascriptInterface(shareBridge, "AndroidShare");
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
+            }
+        } catch (Throwable ignored) {
+        }
 
         webView.setDownloadListener(new DownloadListener() {
             @Override
@@ -874,6 +892,10 @@ public class ChatActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (shareBridge != null && requestCode == ShareBridge.REQ_PROJECTION) {
+            shareBridge.onActivityResult(requestCode, resultCode, data);
+            return;
+        }
         if (requestCode == REQ_FILE && fileCb != null) {
             Uri[] result = null;
             if (Build.VERSION.SDK_INT >= 21) {

@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
@@ -14,30 +15,45 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 
-/** 前台服务：Android 要求屏幕采集必须放在 mediaProjection 类型的前台服务里。 */
+/**
+ * 前台服务：独立共享（RtcSession）与原生桥共享（NativeShare）共用。
+ * mediaProjection 类型；共享期间持 PARTIAL_WAKE_LOCK。
+ */
 class ShareService : Service() {
     companion object {
         const val ACTION_START = "com.phoneshare.app.START"
         const val ACTION_STOP = "com.phoneshare.app.STOP"
         const val ACTION_REVOKE = "com.phoneshare.app.REVOKE"
+        const val ACTION_NATIVE = "com.phoneshare.app.NATIVE"
         private const val CHANNEL_ID = "share"
         private const val NOTI_ID = 1
         @Volatile
         var running = false
+
+        fun startForNative(ctx: Context, data: Intent) {
+            val i = Intent(ctx, ShareService::class.java).setAction(ACTION_NATIVE)
+            i.putExtra("data", data)
+            if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i)
+        }
+
+        fun stopNative(ctx: Context) {
+            val i = Intent(ctx, ShareService::class.java).setAction(ACTION_STOP)
+            ctx.startService(i)
+        }
     }
 
     private var session: RtcSession? = null
+    private var nativeMode = false
     private var wakeLock: PowerManager.WakeLock? = null
     private val handler = Handler(Looper.getMainLooper())
 
-    // 授权状态变化时更新通知（授权期间通知栏显示“有人正在控制你的手机”并带“撤销控制”按钮）
     private val stateListener: (String) -> Unit = { st ->
         handler.post {
             if (running) {
                 try {
                     val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
                     nm.notify(NOTI_ID, buildNotification(st == "granted"))
-                } catch (e: Throwable) {
+                } catch (_: Throwable) {
                 }
             }
         }
@@ -48,22 +64,37 @@ class ShareService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_REVOKE) {
             ControlHandler.revokeByUser()
-            if (session == null) stopSelf()
+            if (session == null && !nativeMode) stopSelf()
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_STOP) {
-            val s = session
-            if (s != null) {
-                s.stop("已手动停止")
-            } else {
+            if (nativeMode) {
+                nativeMode = false
+                running = false
+                try { wakeLock?.release() } catch (_: Throwable) {}
+                wakeLock = null
                 stopForegroundCompat()
                 stopSelf()
+            } else {
+                val s = session
+                if (s != null) s.stop("已手动停止")
+                else {
+                    stopForegroundCompat()
+                    stopSelf()
+                }
             }
             return START_NOT_STICKY
         }
 
-        // 必须尽快进入前台
         startFg()
+        acquireWake()
+
+        if (intent?.action == ACTION_NATIVE) {
+            nativeMode = true
+            running = true
+            ControlHandler.addStateListener(stateListener)
+            return START_NOT_STICKY
+        }
 
         if (session != null) {
             Logx.add("已经在共享中")
@@ -84,20 +115,13 @@ class ShareService : Service() {
             shortSide = intent.getIntExtra("short", 720),
             maxKbps = intent.getIntExtra("kbps", 2500)
         )
-        try {
-            val pm = getSystemService(POWER_SERVICE) as PowerManager
-            val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "phoneshare:share")
-            wl.acquire(6 * 60 * 60 * 1000L)
-            wakeLock = wl
-        } catch (e: Throwable) {
-        }
         running = true
         val s = RtcSession(applicationContext, cfg, data) { reason ->
             Logx.add("共享结束：" + reason)
             handler.post {
                 running = false
                 session = null
-                try { wakeLock?.release() } catch (e: Throwable) {}
+                try { wakeLock?.release() } catch (_: Throwable) {}
                 wakeLock = null
                 stopForegroundCompat()
                 stopSelf()
@@ -113,8 +137,20 @@ class ShareService : Service() {
         ControlHandler.removeStateListener(stateListener)
         session?.stop("服务被关闭")
         running = false
-        try { wakeLock?.release() } catch (e: Throwable) {}
+        nativeMode = false
+        try { wakeLock?.release() } catch (_: Throwable) {}
         super.onDestroy()
+    }
+
+    private fun acquireWake() {
+        if (wakeLock?.isHeld == true) return
+        try {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "phoneshare:share")
+            wl.acquire(6 * 60 * 60 * 1000L)
+            wakeLock = wl
+        } catch (_: Throwable) {
+        }
     }
 
     private fun stopForegroundCompat() {
@@ -127,31 +163,36 @@ class ShareService : Service() {
         val pi = PendingIntent.getService(this, 0, stopIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val revokeIntent = Intent(this, ShareService::class.java).setAction(ACTION_REVOKE)
         val revokePi = PendingIntent.getService(this, 2, revokeIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val openIntent = Intent(this, MainActivity::class.java)
+        val openIntent = Intent(this, ChatActivity::class.java)
         val openPi = PendingIntent.getActivity(this, 1, openIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val stopAction = Notification.Action.Builder(
             Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "停止共享", pi
         ).build()
         val b = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_share)
-            .setContentTitle(if (granted) "有人正在控制你的手机" else "正在共享屏幕")
-            .setContentText(if (granted) "点“撤销控制”可立即收回" else "点击打开应用，或点“停止共享”")
+            .setContentTitle(if (granted) "屏幕共享中 · 对方可控制" else "屏幕共享中")
+            .setContentText(if (granted) "点「撤销控制」可取消对方操作权限" else "正在共享屏幕画面")
             .setContentIntent(openPi)
             .setOngoing(true)
-            .setOnlyAlertOnce(true)
             .addAction(stopAction)
         if (granted) {
             val revokeAction = Notification.Action.Builder(
-                Icon.createWithResource(this, android.R.drawable.ic_menu_revert), "撤销控制", revokePi
+                Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "撤销控制", revokePi
             ).build()
             b.addAction(revokeAction)
+        }
+        if (Build.VERSION.SDK_INT >= 31) {
+            b.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
         }
         return b.build()
     }
 
     private fun startFg() {
-        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        nm.createNotificationChannel(NotificationChannel(CHANNEL_ID, "屏幕共享", NotificationManager.IMPORTANCE_LOW))
+        if (Build.VERSION.SDK_INT >= 26) {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            val ch = NotificationChannel(CHANNEL_ID, "屏幕共享", NotificationManager.IMPORTANCE_LOW)
+            nm.createNotificationChannel(ch)
+        }
         val n = buildNotification(false)
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(NOTI_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
