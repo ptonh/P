@@ -102,10 +102,20 @@ class ShareBridge(
         return try {
             val jo = JSONObject(json)
             NativeShare.prepareIce(jo)
-            val mpm = act.getSystemService(Activity.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            @Suppress("DEPRECATION")
-            val intent = mpm.createScreenCaptureIntent()
-            act.startActivityForResult(intent, REQ_PROJECTION)
+            // JavascriptInterface 不在主线程，必须 post 后再弹系统录屏授权
+            main.post {
+                try {
+                    val a = actRef.get() ?: return@post
+                    val mpm = a.getSystemService(Activity.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    @Suppress("DEPRECATION")
+                    val intent = mpm.createScreenCaptureIntent()
+                    a.startActivityForResult(intent, REQ_PROJECTION)
+                    Logx.add("ShareBridge: 已弹出录屏授权")
+                } catch (e: Throwable) {
+                    Logx.add("ShareBridge: 弹出录屏授权失败: " + e.message)
+                    NativeShare.onProjectionResult(Activity.RESULT_CANCELED, null)
+                }
+            }
             "ok"
         } catch (e: Throwable) {
             "err:" + (e.message ?: "start")
@@ -183,6 +193,7 @@ class ShareBridge(
 
     fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode != REQ_PROJECTION) return
+        Logx.add("ShareBridge: 录屏授权结果 code=" + resultCode + " data=" + (data != null))
         NativeShare.onProjectionResult(resultCode, data)
     }
 

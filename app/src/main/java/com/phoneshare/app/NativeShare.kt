@@ -73,17 +73,32 @@ object NativeShare {
 
     /** 系统录屏授权结果（Activity 回调后调用） */
     fun onProjectionResult(resultCode: Int, data: Intent?) {
-        val ctx = appCtx ?: return
+        val ctx = appCtx ?: run {
+            Logx.add("NativeShare: onProjectionResult 无 Context")
+            return
+        }
         if (resultCode != android.app.Activity.RESULT_OK || data == null) {
+            Logx.add("NativeShare: 用户拒绝或取消录屏授权")
             emit(JSONObject().put("t", "denied"))
             return
         }
         try {
+            // 先起前台服务，再采集（Android 10+ 要求）
             ShareService.startForNative(ctx, data)
-            startCapture(ctx, data)
-            emit(JSONObject().put("t", "started").put("w", capW).put("h", capH))
+            // 稍晚一点再 getMediaProjection，避免服务尚未进前台
+            main.post {
+                try {
+                    startCapture(ctx, data)
+                    emit(JSONObject().put("t", "started").put("w", capW).put("h", capH))
+                    Logx.add("NativeShare: 采集已启动 ${capW}x${capH}")
+                } catch (e: Throwable) {
+                    Logx.add("NativeShare 启动采集失败: " + e.message)
+                    stopInternal("error")
+                    emit(JSONObject().put("t", "denied"))
+                }
+            }
         } catch (e: Throwable) {
-            Logx.add("NativeShare 启动采集失败: " + e.message)
+            Logx.add("NativeShare 启动服务失败: " + e.message)
             stopInternal("error")
             emit(JSONObject().put("t", "denied"))
         }
