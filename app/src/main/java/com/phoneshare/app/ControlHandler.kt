@@ -23,7 +23,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 object ControlHandler {
     private const val MAX_FAILS_SESSION = 3       // 每个会话最多输错次数
     private const val MAX_FAILS_TOTAL = 9         // 跨会话累计输错次数上限，到了必须在手机上点“重置控制锁”
-    private const val IDLE_MS = 10 * 60 * 1000L   // 授权后这么久没有任何指令就自动撤销
+    private const val IDLE_MS = 30 * 60 * 1000L   // C4 v2：授权后空闲 30 分钟自动撤销
     private const val MAX_MSG_LEN = 200           // 超长消息直接丢弃
 
     private val rnd = SecureRandom()
@@ -111,11 +111,13 @@ object ControlHandler {
         val body = msg.substring(3)
         when {
             body.startsWith("auth:") -> handleAuth(body.substring(5).trim(), reply)
+            body == "begin" -> {
+                // C4 v2：打开控制入口；已授权直接 grant，未授权 noauth（页面保持输码框）
+                val g = synchronized(lock) { granted }
+                if (g) reply("rc:grant") else reply("rc:deny:noauth")
+            }
             body == "end" -> {
-                if (revoke()) {
-                    Logx.add("控制：网页主动结束")
-                    notifyState("idle")
-                }
+                // C4 v2：只表示对方暂时退出控制界面，不撤销授权
             }
             else -> handleCommand(body, reply)
         }

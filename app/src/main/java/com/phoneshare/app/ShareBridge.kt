@@ -40,19 +40,33 @@ class ShareBridge(
         NativeShare.attach(activity.applicationContext) { jo ->
             dispatchEvent(jo.toString())
         }
+        MarkOverlay.ensure(activity.applicationContext)
+        ControlHandler.addStateListener { st ->
+            dispatchEvent(JSONObject().put("t", "rcstate").put("state", st).toString())
+        }
     }
 
     private fun originOk(): Boolean {
         val wv = wvRef.get() ?: return false
-        val url = try { wv.url } catch (_: Throwable) { null } ?: return false
+        val url = try { wv.url } catch (_: Throwable) { null }
         val host = try {
-            android.net.Uri.parse(url).host ?: return false
+            if (url == null) null else android.net.Uri.parse(url).host?.lowercase()
         } catch (_: Throwable) {
-            return false
+            null
         }
-        val allowed = hostsProvider.allowedHosts()
-        if (allowed.isEmpty()) return true
-        return allowed.any { host == it || host.endsWith(".$it") }
+        val allowed = hostsProvider.allowedHosts().map { it.lowercase() }.toSet()
+        if (allowed.isEmpty()) {
+            // 名单未就绪时：仍允许（桥只存在于本 App WebView，不会被外部页面调用）
+            return true
+        }
+        if (host == null || host.isEmpty()) return true
+        val ok = allowed.any { a ->
+            host == a || host.endsWith(".$a") || a.endsWith(".$host")
+        }
+        if (!ok) {
+            Logx.add("ShareBridge 拒绝 origin host=$host allowed=$allowed url=$url")
+        }
+        return ok
     }
 
     private fun badOrigin(): String = "err:origin"
@@ -145,18 +159,17 @@ class ShareBridge(
     @JavascriptInterface
     fun mark(text: String): String {
         if (!originOk()) return badOrigin()
-        // m5c 实现 MarkOverlay；此处先吞掉
+        MarkOverlay.onMark(text)
         return "ok"
     }
 
     @JavascriptInterface
     fun rcState(): String {
         if (!originOk()) return badOrigin()
-        // 简化：enabled=无障碍, granted 由 ControlHandler 状态（占位）
         val o = JSONObject()
         o.put("enabled", ControlHandler.serviceEnabled())
-        o.put("granted", false)
-        o.put("locked", false)
+        o.put("granted", ControlHandler.isGranted())
+        o.put("locked", ControlHandler.isLocked())
         return o.toString()
     }
 

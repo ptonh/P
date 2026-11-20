@@ -163,6 +163,7 @@ public class ChatActivity extends Activity {
         if (chatUrl.length() == 0) chatUrl = normalizeUrl(DEFAULT_CHAT_URL);
         videoUrl = prefs.getString("video_url", "");
         chatHost = hostOf(chatUrl);
+        if (videoUrl.length() > 0) videoHost = hostOf(videoUrl);
 
         Notifier.init(this); // 安卓 13 会在这时弹出"允许通知"
         applyBg();
@@ -388,6 +389,15 @@ public class ChatActivity extends Activity {
                 java.util.HashSet<String> s = new java.util.HashSet<String>();
                 if (chatHost.length() > 0) s.add(chatHost);
                 if (videoHost.length() > 0) s.add(videoHost);
+                // 设置里填的视频页域名也放行（不依赖是否已点过通话）
+                String vh = hostOf(videoUrl);
+                if (vh.length() > 0) s.add(vh);
+                // 当前 WebView 主框域名（聊天页跳转后仍可用）
+                try {
+                    String u = webView.getUrl();
+                    String h = hostOf(u != null ? u : "");
+                    if (h.length() > 0) s.add(h);
+                } catch (Throwable ignored) {}
                 return s;
             }
         });
@@ -567,6 +577,7 @@ public class ChatActivity extends Activity {
                         videoUrl = normalizeUrl(e2.getText());
                         chatUrl = u;
                         chatHost = hostOf(u);
+                        videoHost = hostOf(videoUrl);
                         prefs.edit().putString("chat_url", chatUrl).putString("video_url", videoUrl)
                                 .putBoolean("show_poster", cbPoster.isChecked())
                                 .putBoolean("bg_on", cbBg.isChecked()).apply();
