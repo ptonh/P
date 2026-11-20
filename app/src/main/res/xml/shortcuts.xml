@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="settings"
+        android:shortcutShortLabel="@string/app_name"
+        android:shortcutLongLabel="@string/app_name">
+        <intent
+            android:action="com.phoneshare.app.SETTINGS"
+            android:targetPackage="com.phoneshare.app"
+            android:targetClass="com.phoneshare.app.ChatActivity" />
+    </shortcut>
+</shortcuts>

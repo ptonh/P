@@ -82,12 +82,19 @@ class ControlService : AccessibilityService() {
             path.moveTo(px1, py1)
             if (isSwipe) {
                 // 起点终点相同的“滑动”挪 1 像素，避免系统把它当成无效路径
-                if (px1 == px2 && py1 == py2) path.lineTo(px2 + 1f, py2) else path.lineTo(px2, py2)
+                if (px1 == px2 && py1 == py2) {
+                    // 偏移 1 像素；在右边缘时往左偏，避免终点超出屏幕
+                    val nx = if (px2 + 1f <= (w - 1).toFloat()) px2 + 1f else px2 - 1f
+                    path.lineTo(nx, py2)
+                } else {
+                    path.lineTo(px2, py2)
+                }
             }
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0L, durationMs))
                 .build()
-            dispatchGesture(gesture, null, null)
+            val accepted = dispatchGesture(gesture, null, null)
+            if (!accepted) Logx.add("手势未被系统接受")
         } catch (e: Throwable) {
             Logx.add("手势执行失败: " + e.message)
         }

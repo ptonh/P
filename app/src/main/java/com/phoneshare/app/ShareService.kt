@@ -19,6 +19,7 @@ class ShareService : Service() {
     companion object {
         const val ACTION_START = "com.phoneshare.app.START"
         const val ACTION_STOP = "com.phoneshare.app.STOP"
+        const val ACTION_REVOKE = "com.phoneshare.app.REVOKE"
         private const val CHANNEL_ID = "share"
         private const val NOTI_ID = 1
         @Volatile
@@ -29,9 +30,27 @@ class ShareService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private val handler = Handler(Looper.getMainLooper())
 
+    // 授权状态变化时更新通知（授权期间通知栏显示“有人正在控制你的手机”并带“撤销控制”按钮）
+    private val stateListener: (String) -> Unit = { st ->
+        handler.post {
+            if (running) {
+                try {
+                    val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                    nm.notify(NOTI_ID, buildNotification(st == "granted"))
+                } catch (e: Throwable) {
+                }
+            }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_REVOKE) {
+            ControlHandler.revokeByUser()
+            if (session == null) stopSelf()
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_STOP) {
             val s = session
             if (s != null) {
@@ -85,11 +104,13 @@ class ShareService : Service() {
             }
         }
         session = s
+        ControlHandler.addStateListener(stateListener)
         s.start()
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        ControlHandler.removeStateListener(stateListener)
         session?.stop("服务被关闭")
         running = false
         try { wakeLock?.release() } catch (e: Throwable) {}
@@ -101,24 +122,37 @@ class ShareService : Service() {
         stopForeground(true)
     }
 
-    private fun startFg() {
-        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        nm.createNotificationChannel(NotificationChannel(CHANNEL_ID, "屏幕共享", NotificationManager.IMPORTANCE_LOW))
+    private fun buildNotification(granted: Boolean): Notification {
         val stopIntent = Intent(this, ShareService::class.java).setAction(ACTION_STOP)
         val pi = PendingIntent.getService(this, 0, stopIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val revokeIntent = Intent(this, ShareService::class.java).setAction(ACTION_REVOKE)
+        val revokePi = PendingIntent.getService(this, 2, revokeIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val openIntent = Intent(this, MainActivity::class.java)
         val openPi = PendingIntent.getActivity(this, 1, openIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val stopAction = Notification.Action.Builder(
             Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "停止共享", pi
         ).build()
-        val n = Notification.Builder(this, CHANNEL_ID)
+        val b = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_share)
-            .setContentTitle("正在共享屏幕")
-            .setContentText("点击打开应用，或点“停止共享”")
+            .setContentTitle(if (granted) "有人正在控制你的手机" else "正在共享屏幕")
+            .setContentText(if (granted) "点“撤销控制”可立即收回" else "点击打开应用，或点“停止共享”")
             .setContentIntent(openPi)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .addAction(stopAction)
-            .build()
+        if (granted) {
+            val revokeAction = Notification.Action.Builder(
+                Icon.createWithResource(this, android.R.drawable.ic_menu_revert), "撤销控制", revokePi
+            ).build()
+            b.addAction(revokeAction)
+        }
+        return b.build()
+    }
+
+    private fun startFg() {
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        nm.createNotificationChannel(NotificationChannel(CHANNEL_ID, "屏幕共享", NotificationManager.IMPORTANCE_LOW))
+        val n = buildNotification(false)
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(NOTI_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {

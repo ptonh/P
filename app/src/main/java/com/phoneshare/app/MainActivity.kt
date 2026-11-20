@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -34,7 +35,7 @@ class MainActivity : Activity() {
     private lateinit var tvLog: TextView
     private lateinit var scroll: ScrollView
     private lateinit var tvStatus: TextView
-    private var controlState: String = "idle"
+    private val stateListener: (String) -> Unit = { _ -> runOnUiThread { updateStatus() } }
 
     // 清晰度：短边像素（0 = 原始）、码率上限 kbps
     private val qualityNames = listOf("720p（省流，推荐）", "1080p", "原始分辨率")
@@ -64,6 +65,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 本界面显示配对码：加 FLAG_SECURE，屏幕共享里这个界面会变黑，观看者读不到配对码
+        window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         val prefs = getSharedPreferences("cfg", Context.MODE_PRIVATE)
 
         val root = LinearLayout(this)
@@ -111,6 +114,8 @@ class MainActivity : Activity() {
         val row2 = LinearLayout(this)
         row2.orientation = LinearLayout.HORIZONTAL
         row2.addView(button("开启控制权限") { ControlHandler.openSettings(this) })
+        row2.addView(button("撤销控制") { ControlHandler.revokeByUser(); updateStatus() })
+        row2.addView(button("重置控制锁") { ControlHandler.resetLock(); updateStatus() })
         root.addView(row2)
 
         val tip = TextView(this)
@@ -122,10 +127,6 @@ class MainActivity : Activity() {
         tvStatus.textSize = 13f
         root.addView(tvStatus)
 
-        ControlHandler.onStateChange = { st ->
-            controlState = st
-            runOnUiThread { updateStatus() }
-        }
 
         tvLog = TextView(this)
         tvLog.textSize = 12f
@@ -141,6 +142,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        ControlHandler.addStateListener(stateListener)
         tvLog.text = Logx.all() + "\n"
         scrollToEnd()
         updateStatus()
@@ -155,6 +157,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         Logx.listener = null
+        ControlHandler.removeStateListener(stateListener)
         super.onPause()
     }
 
@@ -165,7 +168,14 @@ class MainActivity : Activity() {
         if (code.isNotEmpty()) {
             sb.append("\n配对码：").append(code)
         }
-        sb.append("\n控制：").append(if (controlState == "granted") "已授权" else "未授权")
+        if (ControlHandler.isGranted()) {
+            sb.append("\n控制：已授权（可随时点“撤销控制”）")
+        } else {
+            sb.append("\n控制：未授权")
+        }
+        if (ControlHandler.isLocked()) {
+            sb.append("\n控制已锁定（输错次数过多），点“重置控制锁”后才能再次授权")
+        }
         if (!ControlHandler.serviceEnabled()) {
             sb.append("\n无障碍服务未开启")
         }

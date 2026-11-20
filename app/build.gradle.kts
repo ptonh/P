@@ -12,7 +12,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1-m3a"
+        versionName = "0.1-m5a"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
@@ -28,7 +28,7 @@ android {
 }
 
 dependencies {
-    // WebRTC：社区维护的预编译版（Maven Central），包名仍是 org.webrtc，代码不用改 import
-    // 原先的 org.webrtc:google-webrtc:1.0.32006 疑似只托管在已关闭的 jCenter，拉不到（主导 11/17 决定替换）
     implementation("io.github.webrtc-sdk:android:125.6422.06.1")
+    // 旧壳 NotificationCompat 等（任务包5允许的唯一新增依赖）
+    implementation("androidx.core:core:1.12.0")
 }
