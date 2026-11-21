@@ -55,14 +55,28 @@ class ShareBridge(
         } catch (_: Throwable) {
             null
         }
-        val allowed = hostsProvider.allowedHosts().map { it.lowercase() }.toSet()
-        // 名单空或主框无域名 → 拒绝（安全）
-        if (allowed.isEmpty() || host == null || host.isEmpty()) return false
-        val ok = allowed.any { a -> host == a || host.endsWith(".$a") }
+        val allowed = hostsProvider.allowedHosts().map { it.lowercase() }.filter { it.isNotEmpty() }.toSet()
+        if (allowed.isEmpty() || host == null || host.isEmpty()) {
+            Logx.add("ShareBridge origin 拒绝: host=$host allowed=$allowed url=$url")
+            return false
+        }
+        val ok = allowed.any { a -> sameSite(host, a) }
         if (!ok) {
-            Logx.add("ShareBridge 拒绝 origin host=$host allowed=$allowed url=$url")
+            Logx.add("ShareBridge origin 拒绝: host=$host allowed=$allowed url=$url")
         }
         return ok
+    }
+
+    /** 同站：完全相等、子域，或末两段域名相同（www/非 www、同注册域下的跨域跳转） */
+    private fun sameSite(host: String, allowed: String): Boolean {
+        if (host == allowed) return true
+        if (host.endsWith(".$allowed") || allowed.endsWith(".$host")) return true
+        val h = host.split('.')
+        val a = allowed.split('.')
+        if (h.size >= 2 && a.size >= 2) {
+            if (h[h.size - 1] == a[a.size - 1] && h[h.size - 2] == a[a.size - 2]) return true
+        }
+        return false
     }
 
     private fun badOrigin(): String = "err:origin"

@@ -135,6 +135,8 @@ public class ChatActivity extends Activity {
     private String videoUrl = "";
     // 摄像头 / 麦克风放行的视频页域名：由聊天页真正打开的视频网址自动得出，不用手动填
     private volatile String videoHost = "";
+    /** 主框架实际打开过的域名（仅当与聊天/视频配置同站时加入） */
+    private final java.util.Set<String> runtimeHosts = java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
 
     private AlertDialog settingsDialog;
 
@@ -413,6 +415,7 @@ public class ChatActivity extends Activity {
                 // 设置里填的视频页域名也放行（不依赖是否已点过通话）
                 String vh = hostOf(videoUrl);
                 if (vh.length() > 0) s.add(vh);
+                synchronized (runtimeHosts) { s.addAll(runtimeHosts); }
                 return s;
             }
         });
@@ -699,6 +702,7 @@ public class ChatActivity extends Activity {
         @Override
         public void onPageFinished(WebView view, String url) {
             super.onPageFinished(view, url);
+            noteRuntimeHost(url);
             runJs(HOOK_JS);
             runJs("window.__vurl=" + JSONObject.quote(videoUrl) + ";");
             runJs(NOTIFY_JS);
