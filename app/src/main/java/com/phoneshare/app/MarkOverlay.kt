@@ -136,7 +136,6 @@ object MarkOverlay {
     }
 
     private class MarkView(ctx: Context) : View(ctx) {
-        private val color = Color.parseColor("#ffd600")
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             this.color = colorY()
             style = Paint.Style.STROKE
@@ -226,6 +225,7 @@ object MarkOverlay {
         fun addArrow(payload: String) {
             try {
                 val o = JSONObject(payload)
+                if (arrows.size >= 300) arrows.removeAt(0)
                 arrows.add(
                     floatArrayOf(
                         o.getDouble("x1").toFloat(), o.getDouble("y1").toFloat(),
@@ -239,6 +239,7 @@ object MarkOverlay {
         fun addCircle(payload: String) {
             try {
                 val o = JSONObject(payload)
+                if (circles.size >= 300) circles.removeAt(0)
                 circles.add(
                     floatArrayOf(
                         o.getDouble("x1").toFloat(), o.getDouble("y1").toFloat(),
@@ -255,7 +256,11 @@ object MarkOverlay {
             paint.color = colorY()
             laserPaint.color = colorY()
             for (list in pens.values) {
-                if (list.size < 2) continue
+                if (list.isEmpty()) continue
+                if (list.size == 1) {
+                    canvas.drawCircle(list[0].x * w, list[0].y * h, dp(3f), paint)
+                    continue
+                }
                 val path = Path()
                 path.moveTo(list[0].x * w, list[0].y * h)
                 for (i in 1 until list.size) {

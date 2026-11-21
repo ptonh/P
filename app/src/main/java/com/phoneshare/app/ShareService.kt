@@ -69,12 +69,14 @@ class ShareService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_REFRESH) {
-            if (running) {
-                try {
-                    val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-                    nm.notify(NOTI_ID, buildNotification(ControlHandler.isGranted()))
-                } catch (_: Throwable) {}
+            if (!running) {
+                stopSelf()
+                return START_NOT_STICKY
             }
+            try {
+                val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                nm.notify(NOTI_ID, buildNotification(ControlHandler.isGranted()))
+            } catch (_: Throwable) {}
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_REVOKE) {
@@ -103,7 +105,14 @@ class ShareService : Service() {
         }
 
         val isNative = intent?.action == ACTION_NATIVE
-        startFg(isNative)
+        if (!startFg(isNative)) {
+            Logx.add("ShareService: 无法进入前台，放弃启动")
+            if (isNative) {
+                try { NativeShare.failStart() } catch (_: Throwable) {}
+            }
+            stopSelf()
+            return START_NOT_STICKY
+        }
         acquireWake()
 
         if (isNative) {
@@ -209,10 +218,19 @@ class ShareService : Service() {
             code.isNotEmpty() -> "把配对码告诉对方以开启控制（勿截图发群）"
             else -> "正在共享屏幕画面"
         }
+        val publicN = Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_share)
+            .setContentTitle("屏幕共享中")
+            .setContentText("正在共享屏幕画面")
+            .setContentIntent(openPi)
+            .setOngoing(true)
+            .build()
         val b = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_share)
             .setContentTitle(title)
             .setContentText(text)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicN)
             .setContentIntent(openPi)
             .setOngoing(true)
             .addAction(stopAction)
@@ -228,13 +246,18 @@ class ShareService : Service() {
         return b.build()
     }
 
-    private fun startFg(native: Boolean = false) {
-        if (Build.VERSION.SDK_INT >= 26) {
-            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-            val ch = NotificationChannel(CHANNEL_ID, "屏幕共享", NotificationManager.IMPORTANCE_LOW)
-            nm.createNotificationChannel(ch)
+    private fun startFg(native: Boolean = false): Boolean {
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                val ch = NotificationChannel(CHANNEL_ID, "屏幕共享", NotificationManager.IMPORTANCE_LOW)
+                nm.createNotificationChannel(ch)
+            }
+        } catch (_: Throwable) {}
+        val n = try { buildNotification(false) } catch (e: Throwable) {
+            Logx.add("ShareService buildNotification 失败: " + e.message)
+            return false
         }
-        val n = buildNotification(false)
         if (Build.VERSION.SDK_INT >= 29) {
             var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             if (native && Build.VERSION.SDK_INT >= 30) {
@@ -248,28 +271,49 @@ class ShareService : Service() {
             }
             try {
                 startForeground(NOTI_ID, n, type)
+                return true
             } catch (e: SecurityException) {
-                // 带 microphone 类型可能被系统拒绝，退回仅 mediaProjection
                 Logx.add("ShareService startForeground 带类型失败，退回仅 mediaProjection: " + e.message)
                 try {
                     startForeground(NOTI_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                    return true
                 } catch (e2: Throwable) {
                     Logx.add("ShareService startForeground 退回仍失败: " + e2.message)
-                    @Suppress("DEPRECATION")
-                    startForeground(NOTI_ID, n)
+                    try {
+                        @Suppress("DEPRECATION")
+                        startForeground(NOTI_ID, n)
+                        return true
+                    } catch (e3: Throwable) {
+                        Logx.add("ShareService startForeground 全部失败: " + e3.message)
+                        return false
+                    }
                 }
             } catch (e: Throwable) {
                 Logx.add("ShareService startForeground 失败: " + e.message)
                 try {
                     startForeground(NOTI_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                    return true
                 } catch (_: Throwable) {
-                    @Suppress("DEPRECATION")
-                    startForeground(NOTI_ID, n)
+                    try {
+                        @Suppress("DEPRECATION")
+                        startForeground(NOTI_ID, n)
+                        return true
+                    } catch (e3: Throwable) {
+                        Logx.add("ShareService startForeground 全部失败: " + e3.message)
+                        return false
+                    }
                 }
             }
         } else {
-            startForeground(NOTI_ID, n)
+            return try {
+                startForeground(NOTI_ID, n)
+                true
+            } catch (e: Throwable) {
+                Logx.add("ShareService startForeground 失败: " + e.message)
+                false
+            }
         }
     }
+
 
 }

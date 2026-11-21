@@ -31,6 +31,9 @@ class ShareBridge(
     private val pendingEvents = ArrayDeque<String>()
     private val maxPending = 200
     @Volatile private var pageReady = false
+    /** 主框架域名，仅由主线程 setMainUrl 更新（桥线程禁止读 WebView.url） */
+    @Volatile private var mainHost: String = ""
+
     private val stateListener: (String) -> Unit = { st ->
         dispatchEvent(JSONObject().put("t", "rcstate").put("state", st).toString())
     }
@@ -47,29 +50,20 @@ class ShareBridge(
         ControlHandler.addStateListener(stateListener)
     }
 
+    fun setMainUrl(url: String?) {
+        mainHost = hostOf(url)
+    }
+
     private fun originOk(): Boolean {
-        val wv = wvRef.get() ?: return false
-        val url = try { wv.url } catch (_: Throwable) { null }
-        val original = try {
-            @Suppress("DEPRECATION")
-            wv.originalUrl
-        } catch (_: Throwable) { null }
-        val host = hostOf(url)
-        val host2 = hostOf(original)
+        val host = mainHost
         val allowed = hostsProvider.allowedHosts().map { it.lowercase() }.filter { it.isNotEmpty() }.toSet()
-        // 未配置任何业务域名 → 拒绝（防止异常环境）
-        if (allowed.isEmpty()) {
-            Logx.add("ShareBridge origin 拒绝: 放行名单为空 url=$url")
+        if (host.isEmpty() || allowed.isEmpty()) {
+            Logx.add("ShareBridge origin 拒绝: host=$host allowed=$allowed")
             return false
         }
-        // 主框架域名能对上名单 → 通过
-        if (host.isNotEmpty() && allowed.any { sameSite(host, it) }) return true
-        if (host2.isNotEmpty() && allowed.any { sameSite(host2, it) }) return true
-        // 已配置聊天/视频域名，但 getUrl 拿不到或与名单不一致：
-        // 视频页常在跨域 iframe 内调桥，部分机型主框架 URL 不可靠。
-        // 桥只存在于本 App WebView，名单非空即视为用户已配置可信站点，放行并记日志。
-        Logx.add("ShareBridge origin 放行(已配置名单): host=$host host2=$host2 allowed=$allowed url=$url")
-        return true
+        val ok = allowed.any { a -> host == a || host.endsWith(".$a") }
+        if (!ok) Logx.add("ShareBridge origin 拒绝: host=$host allowed=$allowed")
+        return ok
     }
 
     private fun hostOf(url: String?): String {
@@ -77,18 +71,6 @@ class ShareBridge(
         return try {
             android.net.Uri.parse(url).host?.lowercase() ?: ""
         } catch (_: Throwable) { "" }
-    }
-
-    /** 同站：相等、子域，或末两段相同 */
-    private fun sameSite(host: String, allowed: String): Boolean {
-        if (host == allowed) return true
-        if (host.endsWith(".$allowed") || allowed.endsWith(".$host")) return true
-        val h = host.split('.')
-        val a = allowed.split('.')
-        if (h.size >= 2 && a.size >= 2) {
-            if (h[h.size - 1] == a[a.size - 1] && h[h.size - 2] == a[a.size - 2]) return true
-        }
-        return false
     }
 
     private fun badOrigin(): String = "err:origin"
@@ -260,14 +242,15 @@ class ShareBridge(
         main.post {
             try {
                 wv.evaluateJavascript(js) { result ->
-                    if (result == null || result == "null" || result == "0") {
+                    // 顶层视频页自有 __nativeShare 时可能返回 null，属正常
+                    if (result == "0" || result == "-1") {
                         try {
                             val typ = JSONObject(json).optString("t", "?")
                             Logx.add("ShareBridge: 事件未送达 type=$typ result=$result")
                         } catch (_: Throwable) {
                             Logx.add("ShareBridge: 事件未送达 result=$result")
                         }
-                    } else {
+                    } else if (result != null && result != "null") {
                         try {
                             val typ = JSONObject(json).optString("t", "?")
                             if (loggedTypes.add(typ)) Logx.add("ShareBridge: 事件已送达 type=$typ")

@@ -1,7 +1,6 @@
 package com.phoneshare.app
 
 import android.content.Context
-import android.widget.Toast
 import android.content.Intent
 import android.media.projection.MediaProjection
 import android.os.Handler
@@ -53,6 +52,7 @@ object NativeShare {
     @Volatile private var capturerRunning = false
     @Volatile var pairCode: String = ""
         private set
+    @Volatile private var captureGen = 0
     @Volatile private var answerSet = false
     @Volatile private var sid: String = ""
     @Volatile private var maxBps: Int = 2_500_000
@@ -111,6 +111,17 @@ object NativeShare {
         }
     }
 
+    /** 前台服务无法启动时由 ShareService 调用 */
+    fun failStart() {
+        pendingProjData = null
+        serviceReadyTimeout?.let { main.removeCallbacks(it) }
+        serviceReadyTimeout = null
+        emit(JSONObject().put("t", "denied"))
+        appCtx?.let {
+            try { ShareService.stopNative(it) } catch (_: Throwable) {}
+        }
+    }
+
     /** ShareService 前台就绪后调用 */
     fun onServiceReady() {
         val ctx = appCtx ?: return
@@ -123,12 +134,7 @@ object NativeShare {
             try {
                 val code = ControlHandler.onSessionStart()
                 pairCode = code
-                // 配对码不写日志；Toast + 通知方便用户看到
-                main.post {
-                    try {
-                        Toast.makeText(ctx, "控制配对码：$code", Toast.LENGTH_LONG).show()
-                    } catch (_: Throwable) {}
-                }
+                // 配对码不写日志，仅通知栏展示
                 try { ShareService.refreshNotification(ctx) } catch (_: Throwable) {}
             } catch (e: Throwable) {
                 Logx.add("ControlHandler.onSessionStart 失败: " + e.message)
@@ -309,6 +315,11 @@ object NativeShare {
     // ----- internal -----
 
     private fun startCapture(ctx: Context, data: Intent) {
+        // 若已有旧采集器，先释放再创建
+        try { capturer?.stopCapture() } catch (_: Throwable) {}
+        try { capturer?.dispose() } catch (_: Throwable) {}
+        capturer = null
+        capturerRunning = false
         ensureFactory(ctx)
         val f = factory ?: throw IllegalStateException("factory null")
         val eglBase = egl ?: throw IllegalStateException("egl null")
@@ -318,10 +329,11 @@ object NativeShare {
         if (helper == null) {
             helper = SurfaceTextureHelper.create("NativeCap", eglBase.eglBaseContext)
         }
+        val gen = ++captureGen
         val cb = object : MediaProjection.Callback() {
             override fun onStop() {
                 main.post {
-                    if (capturerRunning) stop("system", notifyService = true)
+                    if (gen == captureGen && capturerRunning) stop("system", notifyService = true)
                 }
             }
         }
@@ -559,6 +571,7 @@ object NativeShare {
 
     private fun stopInternal(why: String) {
         Logx.add("NativeShare stop: $why")
+        captureGen++
         pendingProjData = null
         serviceReadyTimeout?.let { main.removeCallbacks(it) }
         serviceReadyTimeout = null

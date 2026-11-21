@@ -169,6 +169,9 @@ public class ChatActivity extends Activity {
         if (chatUrl.length() == 0) chatUrl = normalizeUrl(DEFAULT_CHAT_URL);
         videoUrl = prefs.getString("video_url", "");
         chatHost = hostOf(chatUrl);
+        if (prefs.getString("chat_url", "").length() == 0) {
+            prefs.edit().putString("chat_url", chatUrl).apply(); // 让后台服务也能读到内置网址
+        }
         if (videoUrl.length() > 0) videoHost = hostOf(videoUrl);
         if (chatHost.length() > 0) runtimeHosts.add(chatHost);
         if (videoHost.length() > 0) runtimeHosts.add(videoHost);
@@ -422,6 +425,8 @@ public class ChatActivity extends Activity {
             }
         });
         webView.addJavascriptInterface(shareBridge, "AndroidShare");
+        if (shareBridge != null) shareBridge.setMainUrl(chatUrl);
+
         try {
             if (Build.VERSION.SDK_INT >= 26) {
                 webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
@@ -473,12 +478,8 @@ public class ChatActivity extends Activity {
         host = host.toLowerCase(Locale.ROOT);
         allowed = allowed.toLowerCase(Locale.ROOT);
         if (host.equals(allowed)) return true;
-        if (host.endsWith("." + allowed) || allowed.endsWith("." + host)) return true;
-        String[] hs = host.split("\\.");
-        String[] as = allowed.split("\\.");
-        if (hs.length >= 2 && as.length >= 2) {
-            return hs[hs.length - 1].equals(as[as.length - 1]) && hs[hs.length - 2].equals(as[as.length - 2]);
-        }
+        // 仅允许 host 是 allowed 的子域，不反向、不按末两段模糊匹配
+        if (host.endsWith("." + allowed)) return true;
         return false;
     }
 
@@ -723,6 +724,7 @@ public class ChatActivity extends Activity {
         @Override
         public void onPageStarted(WebView view, String url, Bitmap favicon) {
             super.onPageStarted(view, url, favicon);
+            if (shareBridge != null) shareBridge.setMainUrl(url);
             webView.setKeepScreenOn(false);
             inCall = false;
         }
@@ -730,6 +732,7 @@ public class ChatActivity extends Activity {
         @Override
         public void onPageFinished(WebView view, String url) {
             super.onPageFinished(view, url);
+            if (shareBridge != null) shareBridge.setMainUrl(url);
             noteRuntimeHost(url);
             runJs(HOOK_JS);
             runJs("window.__vurl=" + JSONObject.quote(videoUrl) + ";");
@@ -738,6 +741,12 @@ public class ChatActivity extends Activity {
 
         @TargetApi(23)
         @Override
+        @Override
+        public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+            super.doUpdateVisitedHistory(view, url, isReload);
+            if (shareBridge != null) shareBridge.setMainUrl(url);
+        }
+
         public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
             if (request.isForMainFrame()) {
                 showError(request.getUrl().toString(), String.valueOf(error.getDescription()));
