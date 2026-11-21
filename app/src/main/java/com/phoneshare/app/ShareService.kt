@@ -71,6 +71,7 @@ class ShareService : Service() {
             if (nativeMode) {
                 nativeMode = false
                 running = false
+                try { NativeShare.stop("user", notifyService = false) } catch (_: Throwable) {}
                 try { wakeLock?.release() } catch (_: Throwable) {}
                 wakeLock = null
                 stopForegroundCompat()
@@ -86,13 +87,17 @@ class ShareService : Service() {
             return START_NOT_STICKY
         }
 
-        startFg()
+        val isNative = intent?.action == ACTION_NATIVE
+        startFg(isNative)
         acquireWake()
 
-        if (intent?.action == ACTION_NATIVE) {
+        if (isNative) {
             nativeMode = true
             running = true
             ControlHandler.addStateListener(stateListener)
+            try { NativeShare.onServiceReady() } catch (e: Throwable) {
+                Logx.add("ShareService: onServiceReady 失败 " + e.message)
+            }
             return START_NOT_STICKY
         }
 
@@ -135,6 +140,9 @@ class ShareService : Service() {
 
     override fun onDestroy() {
         ControlHandler.removeStateListener(stateListener)
+        if (nativeMode) {
+            try { NativeShare.stop("system", notifyService = false) } catch (_: Throwable) {}
+        }
         session?.stop("服务被关闭")
         running = false
         nativeMode = false
@@ -187,7 +195,7 @@ class ShareService : Service() {
         return b.build()
     }
 
-    private fun startFg() {
+    private fun startFg(native: Boolean = false) {
         if (Build.VERSION.SDK_INT >= 26) {
             val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
             val ch = NotificationChannel(CHANNEL_ID, "屏幕共享", NotificationManager.IMPORTANCE_LOW)
@@ -195,9 +203,40 @@ class ShareService : Service() {
         }
         val n = buildNotification(false)
         if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTI_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            if (native && Build.VERSION.SDK_INT >= 30) {
+                val hasMic = try {
+                    checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+                        android.content.pm.PackageManager.PERMISSION_GRANTED
+                } catch (_: Throwable) { false }
+                if (hasMic) {
+                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                }
+            }
+            try {
+                startForeground(NOTI_ID, n, type)
+            } catch (e: SecurityException) {
+                // 带 microphone 类型可能被系统拒绝，退回仅 mediaProjection
+                Logx.add("ShareService startForeground 带类型失败，退回仅 mediaProjection: " + e.message)
+                try {
+                    startForeground(NOTI_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                } catch (e2: Throwable) {
+                    Logx.add("ShareService startForeground 退回仍失败: " + e2.message)
+                    @Suppress("DEPRECATION")
+                    startForeground(NOTI_ID, n)
+                }
+            } catch (e: Throwable) {
+                Logx.add("ShareService startForeground 失败: " + e.message)
+                try {
+                    startForeground(NOTI_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                } catch (_: Throwable) {
+                    @Suppress("DEPRECATION")
+                    startForeground(NOTI_ID, n)
+                }
+            }
         } else {
             startForeground(NOTI_ID, n)
         }
     }
+
 }

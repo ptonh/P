@@ -8,26 +8,31 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.PointF
+import android.graphics.RectF
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.TypedValue
 import android.view.Gravity
+import android.widget.Toast
 import android.view.View
 import android.view.WindowManager
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 悬浮标记层：只画对方的标记，不挡触摸。
- * mk:laser|pen|arrow|circle|clear
- * 坐标 0～1 相对整屏；laser 约 5 秒无更新消失；其余保留到 clear。
+ * 悬浮标记层：只画对方标记，不挡触摸。
+ * 消息格式与页面一致：mk:<type>:<json>
+ * 坐标存 0～1，绘制时乘宽高。
  */
 object MarkOverlay {
     private val main = Handler(Looper.getMainLooper())
     private var wm: WindowManager? = null
     private var view: MarkView? = null
     private var appCtx: Context? = null
+    @Volatile private var permHinted = false
 
     fun ensure(ctx: Context) {
         appCtx = ctx.applicationContext
@@ -59,6 +64,16 @@ object MarkOverlay {
         main.post {
             val ctx = appCtx ?: return@post
             if (!canDraw(ctx)) {
+                if (!permHinted) {
+                    permHinted = true
+                    try {
+                        Toast.makeText(
+                            ctx,
+                            "对方在标记你的屏幕，请在设置里开启“悬浮标记权限”",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } catch (_: Throwable) {}
+                }
                 Logx.add("标记：无悬浮窗权限，忽略")
                 return@post
             }
@@ -76,6 +91,7 @@ object MarkOverlay {
 
     fun hide() {
         main.post {
+            permHinted = false
             val w = wm
             val v = view
             if (w != null && v != null) {
@@ -101,10 +117,15 @@ object MarkOverlay {
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         )
         lp.gravity = Gravity.TOP or Gravity.START
+        if (Build.VERSION.SDK_INT >= 28) {
+            lp.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
         try {
             w.addView(v, lp)
             view = v
@@ -115,28 +136,29 @@ object MarkOverlay {
     }
 
     private class MarkView(ctx: Context) : View(ctx) {
+        private val color = Color.parseColor("#ffd600")
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.YELLOW
+            this.color = colorY()
             style = Paint.Style.STROKE
-            strokeWidth = 6f
+            strokeWidth = dp(3f)
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
         }
-        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.YELLOW
-            style = Paint.Style.FILL
-            alpha = 180
-        }
         private val laserPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.YELLOW
+            this.color = colorY()
             style = Paint.Style.FILL
         }
 
+        private fun colorY(): Int = Color.parseColor("#ffd600")
+        private fun dp(v: Float): Float =
+            TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics)
+
         private var laser: PointF? = null
         private var laserAt = 0L
-        private val pens = ArrayList<Path>()
-        private val arrows = ArrayList<FloatArray>() // x1,y1,x2,y2
-        private val circles = ArrayList<FloatArray>() // cx,cy,r
+        // pen id -> list of normalized points
+        private val pens = LinkedHashMap<String, ArrayList<PointF>>()
+        private val arrows = ArrayList<FloatArray>() // x1,y1,x2,y2 norm
+        private val circles = ArrayList<FloatArray>() // x1,y1,x2,y2 norm (diagonal)
 
         private val laserTimeout = object : Runnable {
             override fun run() {
@@ -159,120 +181,121 @@ object MarkOverlay {
         }
 
         fun setLaser(payload: String) {
-            val p = parsePoint(payload) ?: return
-            laser = p
-            laserAt = System.currentTimeMillis()
-            main.removeCallbacks(laserTimeout)
-            main.postDelayed(laserTimeout, 500)
-            invalidate()
+            try {
+                val o = JSONObject(if (payload.isEmpty()) "{}" else payload)
+                if (o.has("off")) {
+                    laser = null
+                    main.removeCallbacks(laserTimeout)
+                    invalidate()
+                    return
+                }
+                laser = PointF(o.getDouble("x").toFloat(), o.getDouble("y").toFloat())
+                laserAt = System.currentTimeMillis()
+                main.removeCallbacks(laserTimeout)
+                main.postDelayed(laserTimeout, 500)
+                invalidate()
+            } catch (_: Throwable) {}
         }
 
         fun addPen(payload: String) {
-            // 期望 JSON 数组 [[x,y],...] 或 "x1,y1;x2,y2"
             try {
-                val path = Path()
-                if (payload.trim().startsWith("[")) {
-                    val arr = org.json.JSONArray(payload)
-                    var first = true
-                    for (i in 0 until arr.length()) {
-                        val pt = arr.getJSONArray(i)
-                        val x = pt.getDouble(0).toFloat() * width
-                        val y = pt.getDouble(1).toFloat() * height
-                        if (first) { path.moveTo(x, y); first = false } else path.lineTo(x, y)
+                val o = JSONObject(payload)
+                val id = o.optString("id", "p")
+                val arr = o.optJSONArray("p") ?: return
+                var list = pens[id]
+                if (list == null) {
+                    if (pens.size >= 300) {
+                        val first = pens.keys.first()
+                        pens.remove(first)
                     }
-                } else {
-                    val parts = payload.split(";")
-                    var first = true
-                    for (part in parts) {
-                        val xy = part.split(",")
-                        if (xy.size < 2) continue
-                        val x = xy[0].toFloat() * width
-                        val y = xy[1].toFloat() * height
-                        if (first) { path.moveTo(x, y); first = false } else path.lineTo(x, y)
-                    }
+                    list = ArrayList()
+                    pens[id] = list
                 }
-                pens.add(path)
+                var total = 0
+                for (l in pens.values) total += l.size
+                for (i in 0 until arr.length()) {
+                    if (total >= 3000) break
+                    val pt = arr.getJSONArray(i)
+                    list.add(PointF(pt.getDouble(0).toFloat(), pt.getDouble(1).toFloat()))
+                    total++
+                }
                 invalidate()
             } catch (_: Throwable) {}
         }
 
         fun addArrow(payload: String) {
-            val v = parse4(payload) ?: return
-            arrows.add(v)
-            invalidate()
-        }
-
-        fun addCircle(payload: String) {
-            // cx,cy,r 或 JSON
             try {
-                if (payload.trim().startsWith("{")) {
-                    val o = JSONObject(payload)
-                    circles.add(floatArrayOf(
-                        o.getDouble("x").toFloat(),
-                        o.getDouble("y").toFloat(),
-                        o.optDouble("r", 0.05).toFloat()
-                    ))
-                } else {
-                    val p = payload.split(",")
-                    if (p.size >= 3) {
-                        circles.add(floatArrayOf(p[0].toFloat(), p[1].toFloat(), p[2].toFloat()))
-                    }
-                }
-                invalidate()
-            } catch (_: Throwable) {}
-        }
-
-        private fun parsePoint(s: String): PointF? {
-            return try {
-                if (s.trim().startsWith("{")) {
-                    val o = JSONObject(s)
-                    PointF(o.getDouble("x").toFloat(), o.getDouble("y").toFloat())
-                } else {
-                    val p = s.split(",")
-                    if (p.size < 2) null else PointF(p[0].toFloat(), p[1].toFloat())
-                }
-            } catch (_: Throwable) { null }
-        }
-
-        private fun parse4(s: String): FloatArray? {
-            return try {
-                if (s.trim().startsWith("{")) {
-                    val o = JSONObject(s)
+                val o = JSONObject(payload)
+                arrows.add(
                     floatArrayOf(
                         o.getDouble("x1").toFloat(), o.getDouble("y1").toFloat(),
                         o.getDouble("x2").toFloat(), o.getDouble("y2").toFloat()
                     )
-                } else {
-                    val p = s.split(",")
-                    if (p.size < 4) null
-                    else floatArrayOf(p[0].toFloat(), p[1].toFloat(), p[2].toFloat(), p[3].toFloat())
-                }
-            } catch (_: Throwable) { null }
+                )
+                invalidate()
+            } catch (_: Throwable) {}
+        }
+
+        fun addCircle(payload: String) {
+            try {
+                val o = JSONObject(payload)
+                circles.add(
+                    floatArrayOf(
+                        o.getDouble("x1").toFloat(), o.getDouble("y1").toFloat(),
+                        o.getDouble("x2").toFloat(), o.getDouble("y2").toFloat()
+                    )
+                )
+                invalidate()
+            } catch (_: Throwable) {}
         }
 
         override fun onDraw(canvas: Canvas) {
-            val w = width.toFloat()
-            val h = height.toFloat()
-            for (path in pens) canvas.drawPath(path, paint)
+            val w = width.toFloat().coerceAtLeast(1f)
+            val h = height.toFloat().coerceAtLeast(1f)
+            paint.color = colorY()
+            laserPaint.color = colorY()
+            for (list in pens.values) {
+                if (list.size < 2) continue
+                val path = Path()
+                path.moveTo(list[0].x * w, list[0].y * h)
+                for (i in 1 until list.size) {
+                    path.lineTo(list[i].x * w, list[i].y * h)
+                }
+                canvas.drawPath(path, paint)
+            }
+            val head = dp(16f)
             for (a in arrows) {
                 val x1 = a[0] * w
                 val y1 = a[1] * h
                 val x2 = a[2] * w
                 val y2 = a[3] * h
                 canvas.drawLine(x1, y1, x2, y2, paint)
-                // 简单箭头头部
                 val ang = Math.atan2((y2 - y1).toDouble(), (x2 - x1).toDouble())
-                val len = 28.0
-                val a1 = ang - Math.PI * 0.85
-                val a2 = ang + Math.PI * 0.85
-                canvas.drawLine(x2, y2, (x2 + len * Math.cos(a1)).toFloat(), (y2 + len * Math.sin(a1)).toFloat(), paint)
-                canvas.drawLine(x2, y2, (x2 + len * Math.cos(a2)).toFloat(), (y2 + len * Math.sin(a2)).toFloat(), paint)
+                val a1 = ang - 0.45
+                val a2 = ang + 0.45
+                canvas.drawLine(
+                    x2, y2,
+                    (x2 - head * Math.cos(a1)).toFloat(),
+                    (y2 - head * Math.sin(a1)).toFloat(),
+                    paint
+                )
+                canvas.drawLine(
+                    x2, y2,
+                    (x2 - head * Math.cos(a2)).toFloat(),
+                    (y2 - head * Math.sin(a2)).toFloat(),
+                    paint
+                )
             }
             for (c in circles) {
-                canvas.drawCircle(c[0] * w, c[1] * h, c[2] * Math.min(w, h), paint)
+                val left = Math.min(c[0], c[2]) * w
+                val top = Math.min(c[1], c[3]) * h
+                val right = Math.max(c[0], c[2]) * w
+                val bottom = Math.max(c[1], c[3]) * h
+                if (right - left < 1f && bottom - top < 1f) continue
+                canvas.drawOval(RectF(left, top, right, bottom), paint)
             }
             laser?.let {
-                canvas.drawCircle(it.x * w, it.y * h, 18f, laserPaint)
+                canvas.drawCircle(it.x * w, it.y * h, dp(9f), laserPaint)
             }
         }
     }

@@ -10,8 +10,10 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.PictureInPictureParams;
 import android.content.ClipData;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.content.ClipboardManager;
+import android.content.ContentValues;
 import android.content.Context;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -19,6 +21,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.widget.ScrollView;
 import java.text.SimpleDateFormat;
+import java.io.OutputStream;
 import java.util.Date;
 import android.content.DialogInterface;
 import android.content.Intent;
@@ -85,6 +88,7 @@ public class ChatActivity extends Activity {
 
     private static final int REQ_MEDIA = 1;
     private static final int REQ_STORAGE = 2;
+    private static final int REQ_NOTIF = 4;
     private static final int REQ_FILE = 3;
 
     // 下载时网页把文件转成 base64 文本传给软件，限制大小防止内存溢出（约 50MB 文件）
@@ -166,6 +170,13 @@ public class ChatActivity extends Activity {
         if (videoUrl.length() > 0) videoHost = hostOf(videoUrl);
 
         Notifier.init(this); // 安卓 13 会在这时弹出"允许通知"
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this,
+                        new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF);
+            }
+        }
         applyBg();
         applyCallFlags(getIntent());
 
@@ -240,6 +251,16 @@ public class ChatActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (isFinishing()) {
+            try {
+                if (NativeShare.INSTANCE.isCapturing()) {
+                    NativeShare.INSTANCE.stop("system", true);
+                }
+            } catch (Throwable ignored) {}
+            try {
+                if (shareBridge != null) shareBridge.release();
+            } catch (Throwable ignored) {}
+        }
         super.onDestroy();
         if (webView != null) {
             root.removeView(webView);
@@ -392,12 +413,6 @@ public class ChatActivity extends Activity {
                 // 设置里填的视频页域名也放行（不依赖是否已点过通话）
                 String vh = hostOf(videoUrl);
                 if (vh.length() > 0) s.add(vh);
-                // 当前 WebView 主框域名（聊天页跳转后仍可用）
-                try {
-                    String u = webView.getUrl();
-                    String h = hostOf(u != null ? u : "");
-                    if (h.length() > 0) s.add(h);
-                } catch (Throwable ignored) {}
                 return s;
             }
         });
@@ -541,6 +556,17 @@ public class ChatActivity extends Activity {
         cbBg.setText("后台消息提醒（通知栏会常驻一条小通知）");
         cbBg.setChecked(prefs.getBoolean("bg_on", true));
         box.addView(cbBg);
+
+        android.widget.Button btnOverlay = new android.widget.Button(this);
+        boolean ov = MarkOverlay.INSTANCE.canDraw(ChatActivity.this);
+        btnOverlay.setText(ov ? "悬浮标记权限（已授权）" : "悬浮标记权限（未授权，点此开启）");
+        btnOverlay.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                MarkOverlay.INSTANCE.openPermissionSettings(ChatActivity.this);
+            }
+        });
+        box.addView(btnOverlay);
 
         android.widget.Button btnShare = new android.widget.Button(this);
         btnShare.setText("独立共享模式");
@@ -1079,7 +1105,7 @@ public class ChatActivity extends Activity {
     }
 
     private void startSave(final String name, final byte[] bytes) {
-        if (Build.VERSION.SDK_INT < 23 || has(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+        if (Build.VERSION.SDK_INT < 23 || Build.VERSION.SDK_INT >= 29 || has(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
             new Thread(new Runnable() {
                 @Override
                 public void run() {
@@ -1112,6 +1138,40 @@ public class ChatActivity extends Activity {
 
     /** 优先存到系统"下载"目录；没权限或失败时存到软件自己的目录 */
     private void writeDownload(String name, byte[] bytes, boolean usePublic) {
+        if (usePublic && Build.VERSION.SDK_INT >= 29) {
+            android.net.Uri uri = null;
+            try {
+                ContentValues cv = new ContentValues();
+                cv.put(MediaStore.Downloads.DISPLAY_NAME, name);
+                cv.put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream");
+                cv.put(MediaStore.Downloads.IS_PENDING, 1);
+                uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+                if (uri != null) {
+                    OutputStream os = getContentResolver().openOutputStream(uri);
+                    if (os == null) {
+                        getContentResolver().delete(uri, null, null);
+                    } else {
+                        try {
+                            os.write(bytes);
+                            os.flush();
+                        } finally {
+                            os.close();
+                        }
+                        cv.clear();
+                        cv.put(MediaStore.Downloads.IS_PENDING, 0);
+                        getContentResolver().update(uri, cv, null, null);
+                        toast("已保存到下载/" + name);
+                        return;
+                    }
+                }
+            } catch (Exception e) {
+                if (uri != null) {
+                    try { getContentResolver().delete(uri, null, null); } catch (Exception ignored) {}
+                }
+                // 退回旧路径
+            }
+        }
+
         File[] dirs = new File[]{
                 usePublic ? Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS) : null,
                 getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)

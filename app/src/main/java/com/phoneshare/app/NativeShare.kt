@@ -57,6 +57,8 @@ object NativeShare {
     @Volatile private var iceTransportPolicy: PeerConnection.IceTransportsType = PeerConnection.IceTransportsType.ALL
     @Volatile private var capW = 0
     @Volatile private var capH = 0
+    @Volatile private var pendingProjData: Intent? = null
+    private var serviceReadyTimeout: Runnable? = null
     private var orientThread: Thread? = null
     private val orientStop = AtomicBoolean(false)
     private var statsThread: Thread? = null
@@ -82,24 +84,45 @@ object NativeShare {
             emit(JSONObject().put("t", "denied"))
             return
         }
+        pendingProjData = data
         try {
-            // 先起前台服务，再采集（Android 10+ 要求）
             ShareService.startForNative(ctx, data)
-            // 稍晚一点再 getMediaProjection，避免服务尚未进前台
-            main.post {
-                try {
-                    startCapture(ctx, data)
-                    emit(JSONObject().put("t", "started").put("w", capW).put("h", capH))
-                    Logx.add("NativeShare: 采集已启动 ${capW}x${capH}")
-                } catch (e: Throwable) {
-                    Logx.add("NativeShare 启动采集失败: " + e.message)
+            // 等 ShareService 进前台后 onServiceReady 再采集
+            val timeout = Runnable {
+                if (pendingProjData != null) {
+                    Logx.add("NativeShare: 等待前台服务超时")
+                    pendingProjData = null
                     stopInternal("error")
+                    try { ShareService.stopNative(ctx) } catch (_: Throwable) {}
                     emit(JSONObject().put("t", "denied"))
                 }
             }
+            serviceReadyTimeout = timeout
+            main.postDelayed(timeout, 5000L)
         } catch (e: Throwable) {
             Logx.add("NativeShare 启动服务失败: " + e.message)
+            pendingProjData = null
             stopInternal("error")
+            try { ShareService.stopNative(ctx) } catch (_: Throwable) {}
+            emit(JSONObject().put("t", "denied"))
+        }
+    }
+
+    /** ShareService 前台就绪后调用 */
+    fun onServiceReady() {
+        val ctx = appCtx ?: return
+        val data = pendingProjData ?: return
+        pendingProjData = null
+        serviceReadyTimeout?.let { main.removeCallbacks(it) }
+        serviceReadyTimeout = null
+        try {
+            startCapture(ctx, data)
+            emit(JSONObject().put("t", "started").put("w", capW).put("h", capH))
+            Logx.add("NativeShare: 采集已启动 ${capW}x${capH}")
+        } catch (e: Throwable) {
+            Logx.add("NativeShare 启动采集失败: " + e.message)
+            stopInternal("error")
+            try { ShareService.stopNative(ctx) } catch (_: Throwable) {}
             emit(JSONObject().put("t", "denied"))
         }
     }
@@ -192,20 +215,22 @@ object NativeShare {
             }
         }
         tuneSender(sender)
-        preferH264(p)
 
         val mc = MediaConstraints()
         p.createOffer(object : SdpObserver {
             override fun onCreateSuccess(d: SessionDescription?) {
                 if (d == null) return
+                val sdpText = preferH264Sdp(d.description)
+                val local = SessionDescription(SessionDescription.Type.OFFER, sdpText)
                 p.setLocalDescription(object : SdpObserver {
                     override fun onCreateSuccess(x: SessionDescription?) {}
                     override fun onSetSuccess() {
-                        emit(JSONObject().put("t", "sdp").put("type", "offer").put("sdp", d.description))
+                        emit(JSONObject().put("t", "sdp").put("type", "offer").put("sdp", sdpText))
+                        Logx.add("NativeShare offer SDP 已发送（H264 优先调整后）")
                     }
                     override fun onCreateFailure(e: String?) {}
-                    override fun onSetFailure(e: String?) {}
-                }, d)
+                    override fun onSetFailure(e: String?) { Logx.add("setLocalDescription 失败: $e") }
+                }, local)
             }
             override fun onSetSuccess() {}
             override fun onCreateFailure(e: String?) { Logx.add("createOffer 失败: $e") }
@@ -256,10 +281,13 @@ object NativeShare {
         closePcOnly()
     }
 
-    fun stop(why: String = "user") {
+    fun stop(why: String = "user", notifyService: Boolean = true) {
+        val was = capturerRunning || pc != null
         stopInternal(why)
-        appCtx?.let { ShareService.stopNative(it) }
-        emit(JSONObject().put("t", "stopped").put("why", why))
+        if (notifyService) {
+            appCtx?.let { ShareService.stopNative(it) }
+        }
+        if (was) emit(JSONObject().put("t", "stopped").put("why", why))
     }
 
     // ----- internal -----
@@ -276,7 +304,9 @@ object NativeShare {
         }
         val cb = object : MediaProjection.Callback() {
             override fun onStop() {
-                main.post { stop("system") }
+                main.post {
+                    if (capturerRunning) stop("system", notifyService = true)
+                }
             }
         }
         val cap = ScreenCapturerAndroid(data, cb)
@@ -426,9 +456,62 @@ object NativeShare {
     }
 
     private fun preferH264(p: PeerConnection) {
-        // DefaultVideoEncoderFactory 已优先硬件；协商由 SDP 决定
+        // 实际在 SDP 层 preferH264Sdp 处理
     }
 
+    /** 把 H264（及 apt 指向它的 rtx）挪到 m=video 格式列表最前 */
+    private fun preferH264Sdp(sdp: String): String {
+        try {
+            val sep = if (sdp.contains("\r\n")) "\r\n" else "\n"
+            val raw = sdp.split(sep).toMutableList()
+            var i = 0
+            while (i < raw.size) {
+                if (raw[i].startsWith("m=video")) {
+                    val parts = raw[i].split(" ").toMutableList()
+                    if (parts.size <= 3) break
+                    val h264 = LinkedHashSet<String>()
+                    val rtxFor = HashMap<String, String>()
+                    for (line in raw) {
+                        if (line.startsWith("a=rtpmap:") && line.contains("H264/90000")) {
+                            h264.add(line.substring(9).split(" ")[0])
+                        }
+                        if (line.startsWith("a=fmtp:") && line.contains("apt=")) {
+                            val rest = line.substring(7)
+                            val pt = rest.split(" ")[0]
+                            val aptIdx = rest.indexOf("apt=")
+                            if (aptIdx >= 0) {
+                                var apt = rest.substring(aptIdx + 4)
+                                val cut = apt.indexOfAny(charArrayOf(';', ' '))
+                                if (cut >= 0) apt = apt.substring(0, cut)
+                                rtxFor[pt] = apt
+                            }
+                        }
+                    }
+                    if (h264.isEmpty()) {
+                        Logx.add("NativeShare: SDP 无 H264，保持原序")
+                        return sdp
+                    }
+                    val media = parts.subList(3, parts.size).toMutableList()
+                    val preferred = ArrayList<String>()
+                    for (pt in h264) {
+                        if (media.remove(pt)) preferred.add(pt)
+                        for ((rtx, apt) in rtxFor) {
+                            if (apt == pt && media.remove(rtx)) preferred.add(rtx)
+                        }
+                    }
+                    preferred.addAll(media)
+                    raw[i] = (parts.subList(0, 3) + preferred).joinToString(" ")
+                    Logx.add("NativeShare: SDP 已优先 H264 pts=" + h264.joinToString(","))
+                    break
+                }
+                i++
+            }
+            return raw.joinToString(sep)
+        } catch (e: Throwable) {
+            Logx.add("preferH264Sdp: " + e.message)
+            return sdp
+        }
+    }
     private fun ensureFactory(ctx: Context) {
         synchronized(factoryLock) {
             if (factory != null) return
@@ -460,6 +543,10 @@ object NativeShare {
 
     private fun stopInternal(why: String) {
         Logx.add("NativeShare stop: $why")
+        pendingProjData = null
+        serviceReadyTimeout?.let { main.removeCallbacks(it) }
+        serviceReadyTimeout = null
+        try { MarkOverlay.hide() } catch (_: Throwable) {}
         orientStop.set(true)
         orientThread?.interrupt()
         orientThread = null

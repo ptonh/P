@@ -31,6 +31,9 @@ class ShareBridge(
     private val pendingEvents = ArrayDeque<String>()
     private val maxPending = 200
     @Volatile private var pageReady = false
+    private val stateListener: (String) -> Unit = { st ->
+        dispatchEvent(JSONObject().put("t", "rcstate").put("state", st).toString())
+    }
 
     companion object {
         const val REQ_PROJECTION = 4401
@@ -41,9 +44,7 @@ class ShareBridge(
             dispatchEvent(jo.toString())
         }
         MarkOverlay.ensure(activity.applicationContext)
-        ControlHandler.addStateListener { st ->
-            dispatchEvent(JSONObject().put("t", "rcstate").put("state", st).toString())
-        }
+        ControlHandler.addStateListener(stateListener)
     }
 
     private fun originOk(): Boolean {
@@ -55,14 +56,9 @@ class ShareBridge(
             null
         }
         val allowed = hostsProvider.allowedHosts().map { it.lowercase() }.toSet()
-        if (allowed.isEmpty()) {
-            // 名单未就绪时：仍允许（桥只存在于本 App WebView，不会被外部页面调用）
-            return true
-        }
-        if (host == null || host.isEmpty()) return true
-        val ok = allowed.any { a ->
-            host == a || host.endsWith(".$a") || a.endsWith(".$host")
-        }
+        // 名单空或主框无域名 → 拒绝（安全）
+        if (allowed.isEmpty() || host == null || host.isEmpty()) return false
+        val ok = allowed.any { a -> host == a || host.endsWith(".$a") }
         if (!ok) {
             Logx.add("ShareBridge 拒绝 origin host=$host allowed=$allowed url=$url")
         }
@@ -76,10 +72,11 @@ class ShareBridge(
         if (!originOk()) return badOrigin()
         pageReady = true
         main.post {
-            while (pendingEvents.isNotEmpty()) {
-                val s = pendingEvents.removeFirst()
-                evalEvent(s)
+            val batch = ArrayList<String>()
+            synchronized(pendingEvents) {
+                while (pendingEvents.isNotEmpty()) batch.add(pendingEvents.removeFirst())
             }
+            for (s in batch) evalEvent(s)
         }
         return "ok"
     }
@@ -90,7 +87,18 @@ class ShareBridge(
         val o = JSONObject()
         o.put("v", 1)
         o.put("sdk", android.os.Build.VERSION.SDK_INT)
-        o.put("webview", 1)
+        var wvVer = 1
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                val pkg = android.webkit.WebView.getCurrentWebViewPackage()
+                val vn = pkg?.versionName
+                if (vn != null) {
+                    val maj = vn.split(".")[0].toIntOrNull()
+                    if (maj != null) wvVer = maj
+                }
+            }
+        } catch (_: Throwable) {}
+        o.put("webview", wvVer)
         o.put("rc", ControlHandler.serviceEnabled())
         return o.toString()
     }
@@ -208,16 +216,48 @@ class ShareBridge(
         evalEvent(jsonLiteral)
     }
 
+    private val loggedTypes = HashSet<String>()
+
     private fun evalEvent(json: String) {
         val wv = wvRef.get() ?: return
         val quoted = JSONObject.quote(json)
-        val js = "try{window.__nativeShare&&window.__nativeShare.event($quoted)}catch(e){}"
+        // 视频页在聊天页 iframe(vcF) 内：主框架没有 __nativeShare，需转发 postMessage
+        val js = "(function(){" +
+            "if(!window.__nativeShare){" +
+            "window.__nativeShare={event:function(s){" +
+            "var F=document.getElementById('vcF');" +
+            "if(F&&F.contentWindow){F.contentWindow.postMessage({source:'vcall',type:'native',s:String(s)},'*');return 1;}" +
+            "return 0;}};" +
+            "}" +
+            "try{return window.__nativeShare.event(" + quoted + ");}catch(e){return -1;}" +
+            "})()"
         main.post {
             try {
-                wv.evaluateJavascript(js, null)
+                wv.evaluateJavascript(js) { result ->
+                    if (result == null || result == "null" || result == "0") {
+                        try {
+                            val typ = JSONObject(json).optString("t", "?")
+                            Logx.add("ShareBridge: 事件未送达 type=$typ result=$result")
+                        } catch (_: Throwable) {
+                            Logx.add("ShareBridge: 事件未送达 result=$result")
+                        }
+                    } else {
+                        try {
+                            val typ = JSONObject(json).optString("t", "?")
+                            if (loggedTypes.add(typ)) Logx.add("ShareBridge: 事件已送达 type=$typ")
+                        } catch (_: Throwable) {}
+                    }
+                }
             } catch (e: Throwable) {
                 Logx.add("ShareBridge eval: " + e.message)
             }
         }
     }
+
+    fun release() {
+        try { ControlHandler.removeStateListener(stateListener) } catch (_: Throwable) {}
+        pageReady = false
+        synchronized(pendingEvents) { pendingEvents.clear() }
+    }
 }
+

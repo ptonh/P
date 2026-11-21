@@ -2,8 +2,8 @@
 <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
     <shortcut
         android:shortcutId="settings"
-        android:shortcutShortLabel="@string/app_name"
-        android:shortcutLongLabel="@string/app_name">
+        android:shortcutShortLabel="@string/shortcut_settings"
+        android:shortcutLongLabel="@string/shortcut_settings">
         <intent
             android:action="com.phoneshare.app.SETTINGS"
             android:targetPackage="com.phoneshare.app"
