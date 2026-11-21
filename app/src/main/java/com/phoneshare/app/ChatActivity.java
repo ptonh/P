@@ -456,6 +456,30 @@ public class ChatActivity extends Activity {
 
     // ---------------------------------------------------------------- 网址判断
 
+    private void noteRuntimeHost(String url) {
+        String h = hostOf(url);
+        if (h.length() == 0) return;
+        String ch = chatHost;
+        String vh = videoHost.length() > 0 ? videoHost : hostOf(videoUrl);
+        if (sameSiteHost(h, ch) || sameSiteHost(h, vh)) {
+            runtimeHosts.add(h);
+        }
+    }
+
+    private static boolean sameSiteHost(String host, String allowed) {
+        if (host == null || allowed == null || host.length() == 0 || allowed.length() == 0) return false;
+        host = host.toLowerCase(Locale.ROOT);
+        allowed = allowed.toLowerCase(Locale.ROOT);
+        if (host.equals(allowed)) return true;
+        if (host.endsWith("." + allowed) || allowed.endsWith("." + host)) return true;
+        String[] hs = host.split("\\.");
+        String[] as = allowed.split("\\.");
+        if (hs.length >= 2 && as.length >= 2) {
+            return hs[hs.length - 1].equals(as[as.length - 1]) && hs[hs.length - 2].equals(as[as.length - 2]);
+        }
+        return false;
+    }
+
     private static String hostOf(String url) {
         try {
             String h = Uri.parse(url).getHost();

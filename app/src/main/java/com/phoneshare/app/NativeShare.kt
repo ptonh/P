@@ -263,7 +263,7 @@ object NativeShare {
             "cand" -> {
                 val c = json.optJSONObject("c") ?: return
                 val cand = IceCandidate(
-                    c.optString("sdpMid", null),
+                    c.optString("sdpMid", ""),
                     c.optInt("sdpMLineIndex", 0),
                     c.optString("candidate")
                 )
