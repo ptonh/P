@@ -25,6 +25,7 @@ class ShareService : Service() {
         const val ACTION_STOP = "com.phoneshare.app.STOP"
         const val ACTION_REVOKE = "com.phoneshare.app.REVOKE"
         const val ACTION_NATIVE = "com.phoneshare.app.NATIVE"
+        const val ACTION_REFRESH = "com.phoneshare.app.REFRESH"
         private const val CHANNEL_ID = "share"
         private const val NOTI_ID = 1
         @Volatile
@@ -39,6 +40,11 @@ class ShareService : Service() {
         fun stopNative(ctx: Context) {
             val i = Intent(ctx, ShareService::class.java).setAction(ACTION_STOP)
             ctx.startService(i)
+        }
+
+        fun refreshNotification(ctx: Context) {
+            val i = Intent(ctx, ShareService::class.java).setAction(ACTION_REFRESH)
+            try { ctx.startService(i) } catch (_: Throwable) {}
         }
     }
 
@@ -62,6 +68,15 @@ class ShareService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_REFRESH) {
+            if (running) {
+                try {
+                    val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                    nm.notify(NOTI_ID, buildNotification(ControlHandler.isGranted()))
+                } catch (_: Throwable) {}
+            }
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_REVOKE) {
             ControlHandler.revokeByUser()
             if (session == null && !nativeMode) stopSelf()
@@ -176,10 +191,21 @@ class ShareService : Service() {
         val stopAction = Notification.Action.Builder(
             Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "停止共享", pi
         ).build()
+        val code = if (nativeMode) NativeShare.pairCode else ""
+        val title = when {
+            granted -> "屏幕共享中 · 对方可控制"
+            code.isNotEmpty() -> "屏幕共享中 · 配对码 $code"
+            else -> "屏幕共享中"
+        }
+        val text = when {
+            granted -> "点「撤销控制」可取消对方操作权限"
+            code.isNotEmpty() -> "把配对码告诉对方以开启控制（勿截图发群）"
+            else -> "正在共享屏幕画面"
+        }
         val b = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_share)
-            .setContentTitle(if (granted) "屏幕共享中 · 对方可控制" else "屏幕共享中")
-            .setContentText(if (granted) "点「撤销控制」可取消对方操作权限" else "正在共享屏幕画面")
+            .setContentTitle(title)
+            .setContentText(text)
             .setContentIntent(openPi)
             .setOngoing(true)
             .addAction(stopAction)

@@ -50,6 +50,8 @@ object NativeShare {
     @Volatile private var track: VideoTrack? = null
     @Volatile private var pc: PeerConnection? = null
     @Volatile private var capturerRunning = false
+    @Volatile var pairCode: String = ""
+        private set
     @Volatile private var answerSet = false
     @Volatile private var sid: String = ""
     @Volatile private var maxBps: Int = 2_500_000
@@ -117,6 +119,13 @@ object NativeShare {
         serviceReadyTimeout = null
         try {
             startCapture(ctx, data)
+            try {
+                pairCode = ControlHandler.onSessionStart()
+                // 配对码不写日志，只更新通知
+                try { ShareService.refreshNotification(ctx) } catch (_: Throwable) {}
+            } catch (e: Throwable) {
+                Logx.add("ControlHandler.onSessionStart 失败: " + e.message)
+            }
             emit(JSONObject().put("t", "started").put("w", capW).put("h", capH))
             Logx.add("NativeShare: 采集已启动 ${capW}x${capH}")
         } catch (e: Throwable) {
@@ -546,6 +555,8 @@ object NativeShare {
         pendingProjData = null
         serviceReadyTimeout?.let { main.removeCallbacks(it) }
         serviceReadyTimeout = null
+        try { ControlHandler.onSessionEnd() } catch (_: Throwable) {}
+        pairCode = ""
         try { MarkOverlay.hide() } catch (_: Throwable) {}
         orientStop.set(true)
         orientThread?.interrupt()
