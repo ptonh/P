@@ -170,6 +170,8 @@ public class ChatActivity extends Activity {
         videoUrl = prefs.getString("video_url", "");
         chatHost = hostOf(chatUrl);
         if (videoUrl.length() > 0) videoHost = hostOf(videoUrl);
+        if (chatHost.length() > 0) runtimeHosts.add(chatHost);
+        if (videoHost.length() > 0) runtimeHosts.add(videoHost);
 
         Notifier.init(this); // 安卓 13 会在这时弹出"允许通知"
         if (Build.VERSION.SDK_INT >= 33) {
@@ -631,6 +633,8 @@ public class ChatActivity extends Activity {
                         chatUrl = u;
                         chatHost = hostOf(u);
                         videoHost = hostOf(videoUrl);
+                        if (chatHost.length() > 0) runtimeHosts.add(chatHost);
+                        if (videoHost.length() > 0) runtimeHosts.add(videoHost);
                         prefs.edit().putString("chat_url", chatUrl).putString("video_url", videoUrl)
                                 .putBoolean("show_poster", cbPoster.isChecked())
                                 .putBoolean("bg_on", cbBg.isChecked()).apply();
@@ -1091,7 +1095,11 @@ public class ChatActivity extends Activity {
                 Uri u = Uri.parse(url);
                 String sc = u.getScheme() == null ? "" : u.getScheme().toLowerCase(Locale.ROOT);
                 String h = hostOf(url);
-                if ((sc.equals("https") || sc.equals("http")) && h.length() > 0) videoHost = h;
+                // 视频域名可与聊天域名不同：一律加入放行名单
+                if ((sc.equals("https") || sc.equals("http")) && h.length() > 0) {
+                    videoHost = h;
+                    runtimeHosts.add(h);
+                }
             } catch (Exception ignored) {
             }
         }
