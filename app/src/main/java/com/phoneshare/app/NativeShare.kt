@@ -1,6 +1,7 @@
 package com.phoneshare.app
 
 import android.content.Context
+import android.widget.Toast
 import android.content.Intent
 import android.media.projection.MediaProjection
 import android.os.Handler
@@ -120,8 +121,14 @@ object NativeShare {
         try {
             startCapture(ctx, data)
             try {
-                pairCode = ControlHandler.onSessionStart()
-                // 配对码不写日志，只更新通知
+                val code = ControlHandler.onSessionStart()
+                pairCode = code
+                // 配对码不写日志；Toast + 通知方便用户看到
+                main.post {
+                    try {
+                        Toast.makeText(ctx, "控制配对码：$code", Toast.LENGTH_LONG).show()
+                    } catch (_: Throwable) {}
+                }
                 try { ShareService.refreshNotification(ctx) } catch (_: Throwable) {}
             } catch (e: Throwable) {
                 Logx.add("ControlHandler.onSessionStart 失败: " + e.message)

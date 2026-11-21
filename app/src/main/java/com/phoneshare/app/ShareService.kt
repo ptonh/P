@@ -113,6 +113,13 @@ class ShareService : Service() {
             try { NativeShare.onServiceReady() } catch (e: Throwable) {
                 Logx.add("ShareService: onServiceReady 失败 " + e.message)
             }
+            // 采集/配对码就绪后同步刷新通知（避免只靠 startService 刷新失败）
+            try {
+                val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                nm.notify(NOTI_ID, buildNotification(ControlHandler.isGranted()))
+            } catch (e: Throwable) {
+                Logx.add("ShareService: 刷新配对码通知失败 " + e.message)
+            }
             return START_NOT_STICKY
         }
 
@@ -191,7 +198,7 @@ class ShareService : Service() {
         val stopAction = Notification.Action.Builder(
             Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "停止共享", pi
         ).build()
-        val code = if (nativeMode) NativeShare.pairCode else ""
+        val code = try { NativeShare.pairCode } catch (_: Throwable) { "" }
         val title = when {
             granted -> "屏幕共享中 · 对方可控制"
             code.isNotEmpty() -> "屏幕共享中 · 配对码 $code"
