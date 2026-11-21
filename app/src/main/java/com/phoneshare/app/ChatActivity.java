@@ -739,8 +739,6 @@ public class ChatActivity extends Activity {
             runJs(NOTIFY_JS);
         }
 
-        @TargetApi(23)
-        @Override
         @Override
         public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
             super.doUpdateVisitedHistory(view, url, isReload);
