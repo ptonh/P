@@ -412,6 +412,7 @@ class LanFetcher(private val ctx: Context) {
                 ?: "application/octet-stream"
         }
 
+        @JvmStatic
         fun cleanupStale(ctx: Context) {
             try {
                 val dir = File(ctx.getExternalFilesDir(null), "lan")

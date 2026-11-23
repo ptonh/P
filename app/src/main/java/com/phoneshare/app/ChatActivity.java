@@ -143,8 +143,7 @@ public class ChatActivity extends Activity {
     /** 主框架实际打开过的域名（仅当与聊天/视频配置同站时加入） */
     private final java.util.Set<String> runtimeHosts = java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
 
-    private AlertDialog settingsDialog;
-
+    
     private volatile boolean inCall = false;
     private volatile boolean resumed = false;
     /** 软件是否在前台可见（后台查询服务据此决定要不要查） */
