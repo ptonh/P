@@ -16,7 +16,6 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.TypedValue
 import android.view.Gravity
-import android.widget.Toast
 import android.view.View
 import android.view.WindowManager
 import org.json.JSONArray

@@ -1,16 +1,15 @@
 package com.phoneshare.app
 
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.widget.Toast
+import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 
 /**
@@ -57,11 +56,7 @@ object PermNotifier {
 
         ensureChannel(app)
         try {
-            if (kind == "control") {
-                showControl(app)
-            } else {
-                showOverlay(app)
-            }
+            if (kind == "control") showControl(app) else showOverlay(app)
         } catch (e: Exception) {
             Logx.add("PermNotifier: " + e.message)
             try {
@@ -84,21 +79,17 @@ object PermNotifier {
             ctx, 302, appInfo,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val appAction = Notification.Action.Builder(
-            Icon.createWithResource(ctx, android.R.drawable.ic_menu_info_details),
-            "应用信息",
-            appPi
-        ).build()
-        val n = Notification.Builder(ctx, CHANNEL)
+        val n = NotificationCompat.Builder(ctx, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("对方想控制你的手机")
             .setContentText("需要开启无障碍权限，点此去开启")
             .setContentIntent(accPi)
             .setAutoCancel(true)
             .setTimeoutAfter(60_000)
-            .addAction(appAction)
+            .addAction(0, "应用信息", appPi)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
-        (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(ID_CONTROL, n)
+        NotificationManagerCompat.from(ctx).notify(ID_CONTROL, n)
     }
 
     private fun showOverlay(ctx: Context) {
@@ -110,20 +101,21 @@ object PermNotifier {
             ctx, 303, ov,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val n = Notification.Builder(ctx, CHANNEL)
+        val n = NotificationCompat.Builder(ctx, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("对方在标记你的屏幕")
             .setContentText("需要开启悬浮窗权限，点此去开启")
             .setContentIntent(pi)
             .setAutoCancel(true)
             .setTimeoutAfter(60_000)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
-        (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(ID_OVERLAY, n)
+        NotificationManagerCompat.from(ctx).notify(ID_OVERLAY, n)
     }
 
     fun clearIfGranted(ctx: Context) {
         val app = ctx.applicationContext
-        val nm = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val nm = NotificationManagerCompat.from(app)
         if (ControlHandler.serviceEnabled()) {
             nm.cancel(ID_CONTROL)
             lastControl = 0L

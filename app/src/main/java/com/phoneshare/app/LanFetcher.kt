@@ -138,6 +138,7 @@ class LanFetcher(private val ctx: Context) {
                 emitErr(req, id, "io", "无法写入", false)
                 return false
             }
+            val stream: OutputStream = out!!
 
             val url = base.trimEnd('/') + "/f/" + id + "?t=" + token
             while (attempt < 3 && !cancelled.get()) {
@@ -216,7 +217,7 @@ class LanFetcher(private val ctx: Context) {
                         }
                         if (n < 0) break
                         try {
-                            out.write(buf, 0, n)
+                            stream.write(buf, 0, n)
                         } catch (e: Exception) {
                             val msg = e.message ?: ""
                             if (msg.contains("ENOSPC") || msg.contains("No space")) {
@@ -248,8 +249,8 @@ class LanFetcher(private val ctx: Context) {
                         return false
                     }
                     if (size == 0L || got == size) {
-                        out.flush()
-                        out.close()
+                        stream.flush()
+                        stream.close()
                         out = null
                         val resultUri: String
                         if (Build.VERSION.SDK_INT >= 29 && uri != null) {
