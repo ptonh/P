@@ -174,6 +174,14 @@ class ShareBridge(
     @JavascriptInterface
     fun rc(text: String): String {
         if (!originOk()) return badOrigin()
+        if (!ControlHandler.serviceEnabled() &&
+            (text == "rc:begin" || text.startsWith("rc:auth:"))
+        ) {
+            try {
+                val ctx = actRef.get()?.applicationContext
+                if (ctx != null) PermNotifier.show(ctx, "control")
+            } catch (_: Throwable) {}
+        }
         main.post {
             ControlHandler.onMessage(text) { reply ->
                 dispatchEvent(JSONObject().put("t", "rc").put("msg", reply).toString())

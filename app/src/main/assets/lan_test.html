@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>局域网测试</title>
+<style>
+body{font-family:sans-serif;padding:12px;background:#111;color:#eee}
+button{margin:4px 4px 4px 0;padding:8px 12px}
+input,textarea{width:100%;box-sizing:border-box;margin:4px 0;background:#222;color:#eee;border:1px solid #444;padding:6px}
+#log{white-space:pre-wrap;font-size:12px;max-height:40vh;overflow:auto;background:#1a1a1a;padding:8px}
+</style>
+</head>
+<body>
+<h3>局域网传输测试 0.4-lan2</h3>
+<div>
+  <button onclick="doNet()">netInfo</button>
+  <button onclick="doPick()">选文件</button>
+  <button onclick="doServe()">serve</button>
+  <button onclick="doStop()">stop</button>
+</div>
+<div>peerIp（可选）<input id="peer" placeholder="接收方 IP"/></div>
+<div>serve 结果<textarea id="serveOut" rows="4"></textarea></div>
+<div>粘贴后 fetch<textarea id="fetchIn" rows="3"></textarea>
+<button onclick="doFetch()">fetch</button>
+<button onclick="doCancel()">cancel</button>
+<button onclick="doBadToken()">错 token</button>
+</div>
+<div id="log"></div>
+<script>
+function L(s){var e=document.getElementById('log');e.textContent+=s+"\n";e.scrollTop=e.scrollHeight}
+function rid(){return 'r'+Math.random().toString(36).slice(2,10)}
+var lastFiles=[], lastReq='', fetchReq='';
+window.__nativeLan=function(o){
+  try{
+    var e=o&&o.e;
+    var c=JSON.parse(JSON.stringify(o));
+    if(c.token) delete c.token;
+    L(JSON.stringify(c));
+    if(e==='picked'){ lastFiles=o.files||[]; lastReq=o.req||''; }
+  }catch(err){L(String(o))}
+};
+function api(){return window.NativeLan}
+function doNet(){try{L(api().netInfo())}catch(e){L(String(e))}}
+function doPick(){
+  lastReq=rid();
+  try{L('pickFiles -> '+api().pickFiles(lastReq))}catch(e){L(String(e))}
+}
+function doServe(){
+  try{
+    if(!lastFiles.length){L('先选文件');return}
+    var ids=lastFiles.map(function(f){return f.id});
+    var peer=document.getElementById('peer').value.trim();
+    var opts=peer?JSON.stringify({peerIp:peer}):'{}';
+    var r=api().serve(JSON.stringify(ids), opts);
+    L('serve return (token only in box)');
+    var o=JSON.parse(r);
+    if(o.ok){
+      document.getElementById('serveOut').value=JSON.stringify({
+        base:o.base||('http://'+o.ip+':'+o.port),
+        token:o.token,
+        files:lastFiles
+      });
+    }else document.getElementById('serveOut').value=r;
+  }catch(e){L(String(e))}
+}
+function doFetch(){
+  try{
+    var j=JSON.parse(document.getElementById('fetchIn').value.trim());
+    fetchReq=rid();
+    L('fetch -> '+api().fetch(fetchReq, j.base, j.token, JSON.stringify(j.files)));
+  }catch(e){L(String(e))}
+}
+function doCancel(){try{L('cancel -> '+api().cancel(fetchReq))}catch(e){L(String(e))}}
+function doStop(){try{L('stop -> '+api().stop())}catch(e){L(String(e))}}
+function doBadToken(){
+  try{
+    var j=JSON.parse(document.getElementById('fetchIn').value.trim());
+    fetchReq=rid();
+    L('bad token -> '+api().fetch(fetchReq, j.base, 'deadbeef', JSON.stringify(j.files)));
+  }catch(e){L(String(e))}
+}
+L('version='+(api()?api().version():'no'));
+</script>
+</body>
+</html>

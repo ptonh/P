@@ -128,6 +128,11 @@ public class ChatActivity extends Activity {
     private AppChrome chrome;
     private SharedPreferences prefs;
     private ShareBridge shareBridge;
+    private NativeLan nativeLan;
+    private AlertDialog settingsDialog;
+    private android.widget.Button btnControlPerm;
+    private android.widget.Button btnOverlayPerm;
+
 
     private String chatUrl = "";
     private String chatHost = "";
@@ -176,7 +181,8 @@ public class ChatActivity extends Activity {
         if (chatHost.length() > 0) runtimeHosts.add(chatHost);
         if (videoHost.length() > 0) runtimeHosts.add(videoHost);
 
-        Notifier.init(this); // 安卓 13 会在这时弹出"允许通知"
+        Notifier.init(this);
+        new Thread(new Runnable() { public void run() { try { LanFetcher.cleanupStale(ChatActivity.this); } catch (Throwable ignored) {} } }).start(); // 安卓 13 会在这时弹出"允许通知"
         if (Build.VERSION.SDK_INT >= 33) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                     != PackageManager.PERMISSION_GRANTED) {
@@ -231,6 +237,10 @@ public class ChatActivity extends Activity {
         resumed = true;
         Notifier.cancelCall(this); // 回到软件，来电界面已在网页里，停掉通知铃声
         Notifier.cancelMsgs(this);
+        try { PermNotifier.INSTANCE.clearIfGranted(this); } catch (Throwable ignored) {}
+        if (settingsDialog != null && settingsDialog.isShowing()) {
+            refreshPermButtons();
+        }
     }
 
     @Override
@@ -266,6 +276,7 @@ public class ChatActivity extends Activity {
             } catch (Throwable ignored) {}
             try {
                 if (shareBridge != null) shareBridge.release();
+                if (nativeLan != null) nativeLan.release();
             } catch (Throwable ignored) {}
         }
         super.onDestroy();
@@ -426,6 +437,20 @@ public class ChatActivity extends Activity {
         });
         webView.addJavascriptInterface(shareBridge, "AndroidShare");
         if (shareBridge != null) shareBridge.setMainUrl(chatUrl);
+        nativeLan = new NativeLan(this, webView, new NativeLan.HostsProvider() {
+            @Override
+            public java.util.Set<String> allowedHosts() {
+                java.util.HashSet<String> s = new java.util.HashSet<String>();
+                if (chatHost.length() > 0) s.add(chatHost);
+                if (videoHost.length() > 0) s.add(videoHost);
+                String vh = hostOf(videoUrl);
+                if (vh.length() > 0) s.add(vh);
+                synchronized (runtimeHosts) { s.addAll(runtimeHosts); }
+                return s;
+            }
+        });
+        webView.addJavascriptInterface(nativeLan, "NativeLan");
+        if (nativeLan != null) nativeLan.setMainUrl(chatUrl);
 
         try {
             if (Build.VERSION.SDK_INT >= 26) {
@@ -539,6 +564,17 @@ public class ChatActivity extends Activity {
 
     // ---------------------------------------------------------------- 设置弹窗
 
+    private void refreshPermButtons() {
+        if (btnControlPerm != null) {
+            boolean en = ControlHandler.INSTANCE.serviceEnabled();
+            btnControlPerm.setText(en ? "控制权限·无障碍（已开启）" : "控制权限·无障碍（未开启，点此开启）");
+        }
+        if (btnOverlayPerm != null) {
+            boolean ov = MarkOverlay.INSTANCE.canDraw(this);
+            btnOverlayPerm.setText(ov ? "悬浮标记权限（已授权）" : "悬浮标记权限（未授权，点此开启）");
+        }
+    }
+
     private void showSettings() {
         if (settingsDialog != null && settingsDialog.isShowing()) return;
         final boolean first = chatUrl.length() == 0;
@@ -587,16 +623,60 @@ public class ChatActivity extends Activity {
         cbBg.setChecked(prefs.getBoolean("bg_on", true));
         box.addView(cbBg);
 
-        android.widget.Button btnOverlay = new android.widget.Button(this);
-        boolean ov = MarkOverlay.INSTANCE.canDraw(ChatActivity.this);
-        btnOverlay.setText(ov ? "悬浮标记权限（已授权）" : "悬浮标记权限（未授权，点此开启）");
-        btnOverlay.setOnClickListener(new View.OnClickListener() {
+        TextView permTitle = new TextView(this);
+        permTitle.setText("共享与控制权限");
+        permTitle.setTextSize(14f);
+        box.addView(permTitle);
+
+        btnControlPerm = new android.widget.Button(this);
+        btnControlPerm.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                ControlHandler.INSTANCE.openSettings(ChatActivity.this);
+            }
+        });
+        box.addView(btnControlPerm);
+
+        btnOverlayPerm = new android.widget.Button(this);
+        btnOverlayPerm.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 MarkOverlay.INSTANCE.openPermissionSettings(ChatActivity.this);
             }
         });
-        box.addView(btnOverlay);
+        box.addView(btnOverlayPerm);
+
+        TextView permTip = new TextView(this);
+        permTip.setText("安卓13以上通过浏览器/Release安装的应用，开启无障碍前请先到「应用信息 → 右上角 ⋮ → 允许受限制的设置」。");
+        permTip.setTextSize(12f);
+        box.addView(permTip);
+
+        android.widget.Button btnAppInfo = new android.widget.Button(this);
+        btnAppInfo.setText("打开应用信息");
+        btnAppInfo.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                    i.setData(Uri.parse("package:" + getPackageName()));
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(i);
+                } catch (Throwable ignored) {}
+            }
+        });
+        box.addView(btnAppInfo);
+
+        refreshPermButtons();
+
+        android.widget.Button btnLan = new android.widget.Button(this);
+        btnLan.setText("局域网测试（调试）");
+        btnLan.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(ChatActivity.this, LanTestActivity.class));
+            }
+        });
+        box.addView(btnLan);
 
         android.widget.Button btnShare = new android.widget.Button(this);
         btnShare.setText("独立共享模式");
@@ -725,6 +805,7 @@ public class ChatActivity extends Activity {
         public void onPageStarted(WebView view, String url, Bitmap favicon) {
             super.onPageStarted(view, url, favicon);
             if (shareBridge != null) shareBridge.setMainUrl(url);
+            if (nativeLan != null) nativeLan.setMainUrl(url);
             webView.setKeepScreenOn(false);
             inCall = false;
         }
@@ -733,6 +814,7 @@ public class ChatActivity extends Activity {
         public void onPageFinished(WebView view, String url) {
             super.onPageFinished(view, url);
             if (shareBridge != null) shareBridge.setMainUrl(url);
+            if (nativeLan != null) nativeLan.setMainUrl(url);
             noteRuntimeHost(url);
             runJs(HOOK_JS);
             runJs("window.__vurl=" + JSONObject.quote(videoUrl) + ";");
@@ -743,8 +825,11 @@ public class ChatActivity extends Activity {
         public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
             super.doUpdateVisitedHistory(view, url, isReload);
             if (shareBridge != null) shareBridge.setMainUrl(url);
+            if (nativeLan != null) nativeLan.setMainUrl(url);
         }
 
+        @TargetApi(23)
+        @Override
         public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
             if (request.isForMainFrame()) {
                 showError(request.getUrl().toString(), String.valueOf(error.getDescription()));
@@ -970,6 +1055,10 @@ public class ChatActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (shareBridge != null && requestCode == ShareBridge.REQ_PROJECTION) {
             shareBridge.onActivityResult(requestCode, resultCode, data);
+            return;
+        }
+        if (nativeLan != null && requestCode == NativeLan.REQ_LAN_FILES) {
+            nativeLan.onActivityResult(requestCode, resultCode, data);
             return;
         }
         if (requestCode == REQ_FILE && fileCb != null) {

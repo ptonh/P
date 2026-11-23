@@ -11,8 +11,8 @@ android {
         applicationId = "com.phoneshare.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.3-m5c5"
+        versionCode = 9
+        versionName = "0.4-lan4"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }

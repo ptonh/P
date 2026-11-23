@@ -32,7 +32,6 @@ object MarkOverlay {
     private var wm: WindowManager? = null
     private var view: MarkView? = null
     private var appCtx: Context? = null
-    @Volatile private var permHinted = false
 
     fun ensure(ctx: Context) {
         appCtx = ctx.applicationContext
@@ -64,16 +63,7 @@ object MarkOverlay {
         main.post {
             val ctx = appCtx ?: return@post
             if (!canDraw(ctx)) {
-                if (!permHinted) {
-                    permHinted = true
-                    try {
-                        Toast.makeText(
-                            ctx,
-                            "对方在标记你的屏幕，请在设置里开启“悬浮标记权限”",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    } catch (_: Throwable) {}
-                }
+                try { PermNotifier.show(ctx, "overlay") } catch (_: Throwable) {}
                 Logx.add("标记：无悬浮窗权限，忽略")
                 return@post
             }
@@ -91,7 +81,6 @@ object MarkOverlay {
 
     fun hide() {
         main.post {
-            permHinted = false
             val w = wm
             val v = view
             if (w != null && v != null) {
