@@ -32,7 +32,7 @@
             android:exported="true"
             android:supportsPictureInPicture="true"
             android:launchMode="singleTask"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|fontScale|density|locale|layoutDirection|colorMode|navigation"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

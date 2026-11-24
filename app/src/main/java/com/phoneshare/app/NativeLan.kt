@@ -409,6 +409,10 @@ class NativeLan(
         }
     }
 
+    fun isBusy(): Boolean {
+        return server?.isRunning() == true || fetcher?.isActive() == true
+    }
+
     fun release() {
         try { server?.stop() } catch (_: Exception) {}
         try { fetcher?.cancel() } catch (_: Exception) {}

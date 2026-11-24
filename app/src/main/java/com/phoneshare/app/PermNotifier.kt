@@ -1,36 +1,25 @@
 package com.phoneshare.app
 
-import android.app.NotificationChannel
+import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
-import android.os.Build
-import android.provider.Settings
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 
 /**
- * 缺权限时通知并跳转设置（control / overlay）
+ * 缺权限时用消息渠道发通知，点击回 ChatActivity 再跳设置
  */
 object PermNotifier {
-    private const val CHANNEL = "perm_hint"
     private const val ID_CONTROL = 3001
     private const val ID_OVERLAY = 3002
     private const val THROTTLE_MS = 60_000L
+    private const val ACTION_PERM = "com.phoneshare.app.PERM"
 
     @Volatile private var lastControl = 0L
     @Volatile private var lastOverlay = 0L
-
-    private fun ensureChannel(ctx: Context) {
-        if (Build.VERSION.SDK_INT >= 26) {
-            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            val ch = NotificationChannel(CHANNEL, "权限提醒", NotificationManager.IMPORTANCE_HIGH)
-            nm.createNotificationChannel(ch)
-        }
-    }
 
     fun show(ctx: Context, kind: String) {
         val app = ctx.applicationContext
@@ -43,6 +32,14 @@ object PermNotifier {
             lastOverlay = now
         } else return
 
+        try { Notifier.init(app) } catch (_: Throwable) {}
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                val nm = app.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.deleteNotificationChannel("perm_hint")
+            }
+        } catch (_: Throwable) {}
+
         if (!NotificationManagerCompat.from(app).areNotificationsEnabled()) {
             try {
                 val msg = if (kind == "control")
@@ -54,9 +51,9 @@ object PermNotifier {
             return
         }
 
-        ensureChannel(app)
         try {
             if (kind == "control") showControl(app) else showOverlay(app)
+            Logx.add("权限通知：已发出 kind=$kind")
         } catch (e: Exception) {
             Logx.add("PermNotifier: " + e.message)
             try {
@@ -65,50 +62,57 @@ object PermNotifier {
         }
     }
 
-    private fun showControl(ctx: Context) {
-        val acc = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        val accPi = PendingIntent.getActivity(
-            ctx, 301, acc,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val appInfo = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-            data = Uri.parse("package:" + ctx.packageName)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    private fun chatIntent(ctx: Context, kind: String): Intent {
+        return Intent(ctx, ChatActivity::class.java).apply {
+            action = ACTION_PERM
+            putExtra("perm", kind)
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+            )
         }
-        val appPi = PendingIntent.getActivity(
-            ctx, 302, appInfo,
+    }
+
+    private fun showControl(ctx: Context) {
+        val mainPi = PendingIntent.getActivity(
+            ctx, 31, chatIntent(ctx, "control"),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val n = NotificationCompat.Builder(ctx, CHANNEL)
+        val appPi = PendingIntent.getActivity(
+            ctx, 33, chatIntent(ctx, "appinfo"),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val n = NotificationCompat.Builder(ctx, Notifier.CH_MSG)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("对方想控制你的手机")
             .setContentText("需要开启无障碍权限，点此去开启")
-            .setContentIntent(accPi)
+            .setContentIntent(mainPi)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setDefaults(Notification.DEFAULT_ALL)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .setTimeoutAfter(60_000)
             .addAction(0, "应用信息", appPi)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         NotificationManagerCompat.from(ctx).notify(ID_CONTROL, n)
     }
 
     private fun showOverlay(ctx: Context) {
-        val ov = Intent(
-            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-            Uri.parse("package:" + ctx.packageName)
-        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        val pi = PendingIntent.getActivity(
-            ctx, 303, ov,
+        val mainPi = PendingIntent.getActivity(
+            ctx, 32, chatIntent(ctx, "overlay"),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val n = NotificationCompat.Builder(ctx, CHANNEL)
+        val n = NotificationCompat.Builder(ctx, Notifier.CH_MSG)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("对方在标记你的屏幕")
             .setContentText("需要开启悬浮窗权限，点此去开启")
-            .setContentIntent(pi)
+            .setContentIntent(mainPi)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setDefaults(Notification.DEFAULT_ALL)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .setTimeoutAfter(60_000)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         NotificationManagerCompat.from(ctx).notify(ID_OVERLAY, n)
     }

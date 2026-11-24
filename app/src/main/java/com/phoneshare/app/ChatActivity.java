@@ -132,6 +132,8 @@ public class ChatActivity extends Activity {
     private AlertDialog settingsDialog;
     private android.widget.Button btnControlPerm;
     private android.widget.Button btnOverlayPerm;
+    private String pendingPerm;
+
 
 
     private String chatUrl = "";
@@ -191,6 +193,7 @@ public class ChatActivity extends Activity {
         }
         applyBg();
         applyCallFlags(getIntent());
+        capturePermIntent(getIntent());
 
         root = new FrameLayout(this);
         webView = new WebView(this);
@@ -213,8 +216,44 @@ public class ChatActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         applyCallFlags(intent);
+        capturePermIntent(intent);
         if (intent != null && ACTION_SETTINGS.equals(intent.getAction())) {
             showSettings();
+        }
+    }
+
+    private void capturePermIntent(Intent intent) {
+        if (intent == null) return;
+        if ("com.phoneshare.app.PERM".equals(intent.getAction())) {
+            pendingPerm = intent.getStringExtra("perm");
+            try {
+                Logx.INSTANCE.add("权限通知：被点击 kind=" + pendingPerm);
+            } catch (Throwable ignored) {}
+            intent.setAction(null);
+            intent.removeExtra("perm");
+        }
+    }
+
+    private void openPendingPerm() {
+        String kind = pendingPerm;
+        pendingPerm = null;
+        if (kind == null || kind.length() == 0) return;
+        try {
+            Logx.INSTANCE.add("权限通知：开始跳转 kind=" + kind);
+            if ("control".equals(kind)) {
+                ControlHandler.INSTANCE.openSettings(this);
+            } else if ("overlay".equals(kind)) {
+                MarkOverlay.INSTANCE.openPermissionSettings(this);
+            } else if ("appinfo".equals(kind)) {
+                Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                i.setData(Uri.parse("package:" + getPackageName()));
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+            }
+            Logx.INSTANCE.add("权限通知：跳转完成 kind=" + kind);
+        } catch (Throwable e) {
+            try { Logx.INSTANCE.add("权限通知：跳转失败 " + e.getMessage()); } catch (Throwable ignored) {}
+            toast("无法打开设置，请到系统设置里手动开启");
         }
     }
 
@@ -240,6 +279,7 @@ public class ChatActivity extends Activity {
         if (settingsDialog != null && settingsDialog.isShowing()) {
             refreshPermButtons();
         }
+        openPendingPerm();
     }
 
     @Override
@@ -708,6 +748,9 @@ public class ChatActivity extends Activity {
                             toast("请输入正确的聊天网址");
                             return;
                         }
+                        String oldChat = chatUrl;
+                        String oldVideo = videoUrl;
+                        boolean oldBg = prefs.getBoolean("bg_on", true);
                         // 视频网址：填了就用填的；留空 = 使用聊天脚本里的默认网址
                         videoUrl = normalizeUrl(e2.getText());
                         chatUrl = u;
@@ -718,9 +761,41 @@ public class ChatActivity extends Activity {
                         prefs.edit().putString("chat_url", chatUrl).putString("video_url", videoUrl)
                                 .putBoolean("show_poster", cbPoster.isChecked())
                                 .putBoolean("bg_on", cbBg.isChecked()).apply();
-                        applyBg();
+                        boolean addrChanged = !chatUrl.equals(oldChat) || !videoUrl.equals(oldVideo);
+                        boolean bgChanged = cbBg.isChecked() != oldBg;
+                        if (bgChanged) applyBg();
                         d.dismiss();
-                        loadChat();
+                        boolean busy = inCall
+                                || NativeShare.INSTANCE.isCapturing()
+                                || (nativeLan != null && nativeLan.isBusy());
+                        boolean willReload = false;
+                        if (!addrChanged) {
+                            toast("已保存");
+                        } else if (!busy) {
+                            willReload = true;
+                            loadChat();
+                        } else {
+                            new AlertDialog.Builder(ChatActivity.this)
+                                    .setTitle("重新加载聊天页？")
+                                    .setMessage("地址已更改，重新加载会中断当前的通话、共享或传输。现在重新加载吗？")
+                                    .setPositiveButton("重新加载", new DialogInterface.OnClickListener() {
+                                        @Override
+                                        public void onClick(DialogInterface dialog, int which) {
+                                            loadChat();
+                                        }
+                                    })
+                                    .setNegativeButton("稍后", new DialogInterface.OnClickListener() {
+                                        @Override
+                                        public void onClick(DialogInterface dialog, int which) {
+                                            toast("新地址将在下次打开聊天页时生效");
+                                        }
+                                    })
+                                    .show();
+                        }
+                        try {
+                            Logx.INSTANCE.add("设置保存：chat/video变化=" + addrChanged
+                                    + "、bg变化=" + bgChanged + "、是否重载=" + willReload);
+                        } catch (Throwable ignored) {}
                     }
                 });
                 d.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(new View.OnClickListener() {
