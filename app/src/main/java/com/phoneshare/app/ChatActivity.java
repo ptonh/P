@@ -509,6 +509,17 @@ public class ChatActivity extends Activity {
         chrome = new AppChrome();
         webView.setWebViewClient(new AppClient());
         webView.setWebChromeClient(chrome);
+        String wvv = "?";
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                android.content.pm.PackageInfo pi = WebView.getCurrentWebViewPackage();
+                wvv = pi == null ? "null" : (pi.packageName + " " + pi.versionName);
+            }
+        } catch (Throwable ignored) {}
+        try {
+            Logx.INSTANCE.add("env sdk=" + Build.VERSION.SDK_INT + " wv=" + wvv
+                    + " brand=" + Build.MANUFACTURER + " model=" + Build.MODEL);
+        } catch (Throwable ignored) {}
     }
 
     private void loadChat() {
@@ -979,18 +990,37 @@ public class ChatActivity extends Activity {
         @TargetApi(21)
         @Override
         public boolean onShowFileChooser(WebView w, ValueCallback<Uri[]> cb, FileChooserParams params) {
+            try {
+                Logx.INSTANCE.add("fileChooser enter mode=" + params.getMode()
+                        + " accept=" + java.util.Arrays.toString(params.getAcceptTypes())
+                        + " cbPrevNull=" + (fileCb == null));
+            } catch (Throwable ignored) {}
             if (fileCb != null) {
                 fileCb.onReceiveValue(null);
             }
             fileCb = cb;
             try {
                 startActivityForResult(params.createIntent(), REQ_FILE);
+                try { Logx.INSTANCE.add("fileChooser started"); } catch (Throwable ignored) {}
             } catch (Exception e) {
+                try { Logx.INSTANCE.add("fileChooser fail: " + e); } catch (Throwable ignored) {}
                 fileCb = null;
                 cb.onReceiveValue(null);
                 toast("无法打开文件选择器");
             }
             return true;
+        }
+
+        @Override
+        public boolean onConsoleMessage(android.webkit.ConsoleMessage m) {
+            try {
+                String s = String.valueOf(m.message());
+                String l = s.toLowerCase();
+                if (l.contains("chooser") || l.contains("user activation") || l.contains("file input")) {
+                    Logx.INSTANCE.add("console: " + (s.length() > 200 ? s.substring(0, 200) : s));
+                }
+            } catch (Throwable ignored) {}
+            return super.onConsoleMessage(m);
         }
 
         // 网页里的新窗口（target=_blank / window.open）一律交给系统浏览器，不替换聊天页
@@ -1127,6 +1157,10 @@ public class ChatActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        try {
+            Logx.INSTANCE.add("onActivityResult req=" + requestCode + " code=" + resultCode
+                    + " dataNull=" + (data == null));
+        } catch (Throwable ignored) {}
         if (shareBridge != null && requestCode == ShareBridge.REQ_PROJECTION) {
             shareBridge.onActivityResult(requestCode, resultCode, data);
             return;
@@ -1140,8 +1174,14 @@ public class ChatActivity extends Activity {
             if (Build.VERSION.SDK_INT >= 21) {
                 result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
             }
+            try {
+                Logx.INSTANCE.add("fileChooser result uris="
+                        + (result == null ? "null" : String.valueOf(result.length)));
+            } catch (Throwable ignored) {}
             fileCb.onReceiveValue(result);
             fileCb = null;
+        } else if (requestCode == REQ_FILE) {
+            try { Logx.INSTANCE.add("fileChooser result but cb==null"); } catch (Throwable ignored) {}
         }
     }
 
