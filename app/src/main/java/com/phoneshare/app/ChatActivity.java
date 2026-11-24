@@ -148,6 +148,16 @@ public class ChatActivity extends Activity {
             + ".then(function(){return T('opfs-remove',function(){return window.__prd.removeEntry('probe-tmp')})});"
             + "})();";
 
+    // 临时补丁：WebView 暴露了无界面的 showSaveFilePicker，导致 lanSink 卡住；隐藏后走 OPFS
+    private static final String SHIM_JS =
+              "(function(){try{"
+            + "['showSaveFilePicker','showDirectoryPicker'].forEach(function(k){"
+            + "try{Object.defineProperty(window,k,{value:undefined,configurable:true,writable:true})}"
+            + "catch(e){try{window[k]=undefined}catch(e2){}}});"
+            + "console.log('[probe] shim picker='+typeof window.showSaveFilePicker+'/'+typeof window.showDirectoryPicker);"
+            + "}catch(e){}})();";
+
+
 
     private FrameLayout root;
     private WebView webView;
@@ -931,6 +941,7 @@ public class ChatActivity extends Activity {
             runJs("window.__vurl=" + JSONObject.quote(videoUrl) + ";");
             runJs(NOTIFY_JS);
             runJs(PROBE_JS);
+            runJs(SHIM_JS);
         }
 
         @Override
