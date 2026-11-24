@@ -123,6 +123,32 @@ public class ChatActivity extends Activity {
             + "try{var ovi=window.vcShowIn;if(typeof ovi==='function'&&!ovi.__c){var nvi=function(id,room,voice){var fresh=(vcIn!==id);var rv=ovi.apply(this,arguments);try{if(fresh&&vcIn===id&&!document.hidden&&sysOk()){HostBridge.notify(String(roomTitle(room)),voice?'邀请你语音通话':'邀请你视频通话','vcall');}}catch(x){}return rv;};nvi.__c=1;window.vcShowIn=nvi;}}catch(e){}\n"
             + "try{var ovh=window.vcHideIn;if(typeof ovh==='function'&&!ovh.__c){var nvh=function(){var rv=ovh.apply(this,arguments);try{HostBridge.callEnd();}catch(x){}return rv;};nvh.__c=1;window.vcHideIn=nvh;}}catch(e){}\n"
             + "})();\n";
+
+    // 只读探针：检测 WebView 对 showSaveFilePicker / OPFS 的真实支持（写 1KB 临时文件后删除）
+    private static final String PROBE_JS =
+              "(function(){if(window.__pr)return;window.__pr=1;"
+            + "function P(s){try{console.log('[probe] '+s)}catch(e){}}"
+            + "function T(name,fn){return new Promise(function(res){var done=0;"
+            + "var t=setTimeout(function(){if(!done){done=1;P(name+' TIMEOUT 3s');res()}},3000);"
+            + "Promise.resolve().then(fn).then("
+            + "function(v){if(!done){done=1;clearTimeout(t);P(name+' OK '+(v===undefined?'':v));res()}},"
+            + "function(e){if(!done){done=1;clearTimeout(t);P(name+' ERR '+(e&&e.name)+': '+(e&&e.message));res()}})})}"
+            + "P('showSaveFilePicker='+typeof window.showSaveFilePicker+' showDirectoryPicker='+typeof window.showDirectoryPicker"
+            + "+' getDirectory='+(navigator.storage?typeof navigator.storage.getDirectory:'nostorage')"
+            + "+' FSFH='+typeof window.FileSystemFileHandle"
+            + "+' createWritable='+(window.FileSystemFileHandle?typeof FileSystemFileHandle.prototype.createWritable:'n/a')"
+            + "+' secure='+window.isSecureContext+' origin='+location.origin);"
+            + "T('opfs-getDirectory',function(){return navigator.storage.getDirectory().then(function(d){window.__prd=d;return 'ok'})})"
+            + ".then(function(){return T('opfs-getFileHandle',function(){return window.__prd.getFileHandle('probe-tmp',{create:true}).then(function(h){window.__prh=h;return 'ok'})})})"
+            + ".then(function(){return T('opfs-createWritable',function(){return window.__prh.createWritable().then(function(w){window.__prw=w;return 'ok'})})})"
+            + ".then(function(){return T('opfs-write',function(){return window.__prw.write(new Uint8Array(1024))})})"
+            + ".then(function(){return T('opfs-close',function(){return window.__prw.close()})})"
+            + ".then(function(){return T('opfs-getFile',function(){return window.__prh.getFile().then(function(f){return 'size='+f.size})})})"
+            + ".then(function(){return T('opfs-keys',function(){var n=0;return (async function(){for await(var k of window.__prd.keys())n++;return 'n='+n})()})})"
+            + ".then(function(){return T('opfs-remove',function(){return window.__prd.removeEntry('probe-tmp')})});"
+            + "})();";
+
+
     private FrameLayout root;
     private WebView webView;
     private AppChrome chrome;
@@ -904,6 +930,7 @@ public class ChatActivity extends Activity {
             runJs(HOOK_JS);
             runJs("window.__vurl=" + JSONObject.quote(videoUrl) + ";");
             runJs(NOTIFY_JS);
+            runJs(PROBE_JS);
         }
 
         @Override
@@ -1021,9 +1048,15 @@ public class ChatActivity extends Activity {
         public boolean onConsoleMessage(android.webkit.ConsoleMessage m) {
             try {
                 String s = String.valueOf(m.message());
-                String l = s.toLowerCase();
-                if (l.contains("chooser") || l.contains("user activation") || l.contains("file input")) {
-                    Logx.INSTANCE.add("console: " + (s.length() > 200 ? s.substring(0, 200) : s));
+                boolean probe = s.startsWith("[probe]");
+                boolean bad = m.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR
+                        || m.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.WARNING;
+                if (probe || bad) {
+                    String src = String.valueOf(m.sourceId());
+                    if (src.length() > 40) src = "…" + src.substring(src.length() - 40);
+                    String line = (probe ? "" : "console[" + m.messageLevel() + "] ") + s
+                            + (probe ? "" : "  @" + src + ":" + m.lineNumber());
+                    Logx.INSTANCE.add(line.length() > 400 ? line.substring(0, 400) : line);
                 }
             } catch (Throwable ignored) {}
             return super.onConsoleMessage(m);
