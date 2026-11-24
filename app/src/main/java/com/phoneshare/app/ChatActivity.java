@@ -1000,7 +1000,13 @@ public class ChatActivity extends Activity {
             }
             fileCb = cb;
             try {
-                startActivityForResult(params.createIntent(), REQ_FILE);
+                Intent ci = params.createIntent();
+                try {
+                    Logx.INSTANCE.add("fileChooser intent action=" + ci.getAction()
+                            + " type=" + ci.getType()
+                            + " multi=" + ci.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false));
+                } catch (Throwable ignored) {}
+                startActivityForResult(ci, REQ_FILE);
                 try { Logx.INSTANCE.add("fileChooser started"); } catch (Throwable ignored) {}
             } catch (Exception e) {
                 try { Logx.INSTANCE.add("fileChooser fail: " + e); } catch (Throwable ignored) {}
@@ -1173,6 +1179,47 @@ public class ChatActivity extends Activity {
             Uri[] result = null;
             if (Build.VERSION.SDK_INT >= 21) {
                 result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+            }
+            if ((result == null || result.length == 0) && resultCode == Activity.RESULT_OK && data != null) {
+                try {
+                    android.content.ClipData cd = data.getClipData();
+                    Logx.INSTANCE.add("fileChooser raw: data=" + data.getData()
+                            + " clip=" + (cd == null ? "null" : String.valueOf(cd.getItemCount()))
+                            + " action=" + data.getAction()
+                            + " type=" + data.getType()
+                            + " flags=" + data.getFlags());
+                    android.os.Bundle ex = data.getExtras();
+                    Logx.INSTANCE.add("fileChooser raw extras="
+                            + (ex == null ? "null" : ex.keySet().toString()));
+                    java.util.ArrayList<Uri> found = new java.util.ArrayList<Uri>();
+                    if (cd != null) {
+                        for (int i = 0; i < cd.getItemCount(); i++) {
+                            Uri u = cd.getItemAt(i).getUri();
+                            if (u != null) found.add(u);
+                        }
+                    }
+                    if (found.isEmpty() && data.getData() != null) found.add(data.getData());
+                    if (found.isEmpty() && ex != null) {
+                        for (String k : ex.keySet()) {
+                            Object v = ex.get(k);
+                            if (v instanceof Uri) {
+                                found.add((Uri) v);
+                            } else if (v instanceof java.util.List) {
+                                for (Object o : (java.util.List<?>) v) {
+                                    if (o instanceof Uri) found.add((Uri) o);
+                                }
+                            } else if (v instanceof Object[]) {
+                                for (Object o : (Object[]) v) {
+                                    if (o instanceof Uri) found.add((Uri) o);
+                                }
+                            }
+                        }
+                    }
+                    Logx.INSTANCE.add("fileChooser fallback uris=" + found.size());
+                    if (!found.isEmpty()) result = found.toArray(new Uri[0]);
+                } catch (Throwable t2) {
+                    Logx.INSTANCE.add("fileChooser fallback err=" + t2);
+                }
             }
             try {
                 Logx.INSTANCE.add("fileChooser result uris="
