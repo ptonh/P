@@ -49,6 +49,10 @@ class NativeLan(
     @Volatile private var fetchReq: String = ""
 
     private val table = ConcurrentHashMap<String, Entry>()
+    private val saveHandles = ConcurrentHashMap<String, SaveHandle>()
+    private val saveLock = Any()
+    private val serviceHold = java.util.concurrent.atomic.AtomicInteger(0)
+    private val prefs by lazy { appCtx.getSharedPreferences("lan_save_ledger", android.content.Context.MODE_PRIVATE) }
     private val pendingEvents = ArrayDeque<String>()
     private val maxPending = 200
 
@@ -91,7 +95,7 @@ class NativeLan(
     @JavascriptInterface
     fun version(): Int {
         if (!originOk()) return 0
-        return 1
+        return 2
     }
 
     @JavascriptInterface
@@ -303,7 +307,7 @@ class NativeLan(
             val id = f.optString("id", "")
             if (!id.matches(Regex("^[A-Za-z0-9_-]{1,64}$"))) return """{"ok":false,"err":"bad_files"}"""
             val size = f.optLong("size", -1)
-            if (size < 0 || size > 4L * 1024 * 1024 * 1024) return """{"ok":false,"err":"bad_files"}"""
+            if (size < 0) return """{"ok":false,"err":"bad_files"}"""
             val name = LanFetcher.sanitizeName(f.optString("name", ""))
             if (name.isEmpty()) return """{"ok":false,"err":"bad_files"}"""
         }
@@ -315,7 +319,9 @@ class NativeLan(
         f.fetchBatch(req, baseUrl, token, files) {
             if (!f.isActive()) {
                 // stop service if server also idle
-                if (server?.isRunning() != true) LanService.stop(appCtx)
+                if (server?.isRunning() != true && saveHandles.isEmpty() && serviceHold.get() <= 0) {
+                    try { LanService.stop(appCtx) } catch (_: Exception) {}
+                }
             }
         }
         return """{"ok":true}"""
@@ -350,7 +356,9 @@ class NativeLan(
         try { server?.stop() } catch (_: Exception) {}
         server = null
         try { fetcher?.cancel() } catch (_: Exception) {}
-        LanService.stop(appCtx)
+        if (saveHandles.isEmpty() && serviceHold.get() <= 0) {
+            try { LanService.stop(appCtx) } catch (_: Exception) {}
+        }
         return """{"ok":true}"""
     }
 
@@ -409,17 +417,288 @@ class NativeLan(
         }
     }
 
+
+    // ---------- 分块保存 v1.2 ----------
+    private class SaveHandle(
+        val id: String,
+        val name: String,
+        val size: Long,
+        val mime: String,
+        var uri: android.net.Uri?,
+        var file: java.io.File?,
+        var out: java.io.OutputStream?,
+        var written: Long = 0,
+        var lastWriteAt: Long = System.currentTimeMillis(),
+        val lock: Any = Any()
+    )
+
+    private fun holdService() {
+        if (serviceHold.getAndIncrement() == 0) {
+            try { LanService.start(appCtx) } catch (_: Exception) {}
+        }
+    }
+
+    private fun releaseService() {
+        val v = serviceHold.decrementAndGet()
+        if (v <= 0) {
+            serviceHold.set(0)
+            if (server?.isRunning() != true && fetcher?.isActive() != true) {
+                try { LanService.stop(appCtx) } catch (_: Exception) {}
+            }
+        }
+    }
+
+    private fun ledgerAdd(id: String, token: String) {
+        try {
+            val set = prefs.getStringSet("open", HashSet())?.toMutableSet() ?: HashSet()
+            set.add(id + "|" + token)
+            prefs.edit().putStringSet("open", set).apply()
+        } catch (_: Exception) {}
+    }
+
+    private fun ledgerRemove(id: String) {
+        try {
+            val set = prefs.getStringSet("open", HashSet())?.toMutableSet() ?: return
+            set.removeAll { it.startsWith(id + "|") }
+            prefs.edit().putStringSet("open", set).apply()
+        } catch (_: Exception) {}
+    }
+
+    init {
+        if (ledgerCleaned.compareAndSet(false, true)) {
+            try {
+                val set = prefs.getStringSet("open", emptySet())?.toList() ?: emptyList()
+                for (item in set) {
+                    val parts = item.split("|", limit = 2)
+                    if (parts.size < 2) continue
+                    val token = parts[1]
+                    try {
+                        if (token.startsWith("content:")) {
+                            appCtx.contentResolver.delete(android.net.Uri.parse(token), null, null)
+                        } else {
+                            java.io.File(token).delete()
+                        }
+                    } catch (_: Exception) {}
+                }
+                prefs.edit().remove("open").apply()
+                LanFetcher.cleanupStale(appCtx)
+            } catch (_: Exception) {}
+        }
+        // 监视线程：进程级单次启动。release() 不得 shutdown io，否则 watcherStarted=true 而线程已死。
+        synchronized(watcherLock) {
+            if (!watcherStarted) {
+                watcherStarted = true
+                watcherStop = false
+                io.execute {
+                    while (!watcherStop) {
+                        try { Thread.sleep(30_000) } catch (_: InterruptedException) { break }
+                        if (watcherStop) break
+                        val now = System.currentTimeMillis()
+                        for ((id, h) in saveHandles.toMap()) {
+                            if (now - h.lastWriteAt > 10 * 60 * 1000L) {
+                                try { saveAbortInternal(id) } catch (_: Exception) {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @android.webkit.JavascriptInterface
+    fun saveOpen(name: String, size: Long): String {
+        if (!originOk()) return "err:origin"
+        if (saveHandles.size >= 2) return "err:toomany"
+        return try {
+            val safe = LanFetcher.sanitizeName(name)
+            val m = LanFetcher.mimeFromName(safe)
+            if (size >= 0) {
+                try {
+                    val path = android.os.Environment.getExternalStorageDirectory()
+                    val st = android.os.StatFs(path.path)
+                    val avail = st.availableBytes
+                    val need = (size * 1.05).toLong()
+                    if (avail < need) return "err:nospace"
+                } catch (_: Exception) {}
+            }
+            val id = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 12)
+            var uri: android.net.Uri? = null
+            var file: java.io.File? = null
+            var out: java.io.OutputStream? = null
+            var ledgerToken = ""
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                val cv = android.content.ContentValues()
+                cv.put(android.provider.MediaStore.Downloads.DISPLAY_NAME, safe)
+                cv.put(android.provider.MediaStore.Downloads.MIME_TYPE, m)
+                cv.put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+                uri = appCtx.contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)
+                if (uri == null) return "err:io"
+                out = appCtx.contentResolver.openOutputStream(uri)
+                ledgerToken = uri.toString()
+            } else {
+                val has = android.os.Build.VERSION.SDK_INT < 23 ||
+                    appCtx.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (!has) return "err:perm"
+                val dir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                dir.mkdirs()
+                file = java.io.File(dir, safe + ".part")
+                if (file.exists()) file.delete()
+                out = java.io.FileOutputStream(file)
+                ledgerToken = file.absolutePath
+            }
+            if (out == null) {
+                uri?.let { try { appCtx.contentResolver.delete(it, null, null) } catch (_: Exception) {} }
+                return "err:io"
+            }
+            val h = SaveHandle(id, safe, size, m, uri, file, out)
+            saveHandles[id] = h
+            ledgerAdd(id, ledgerToken)
+            holdService()
+            "ok:$id"
+        } catch (e: Exception) {
+            "err:io"
+        }
+    }
+
+    @android.webkit.JavascriptInterface
+    fun saveWrite(handle: String, offset: Long, b64: String): String {
+        if (!originOk()) return "err:origin"
+        val h = saveHandles[handle] ?: return "err:badhandle"
+        return synchronized(h.lock) {
+            try {
+                if (offset != h.written) return@synchronized "err:offset"
+                val data = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                if (data.size > 1024 * 1024) return@synchronized "err:big"
+                try {
+                    h.out?.write(data)
+                } catch (e: Exception) {
+                    val msg = e.message ?: ""
+                    if (msg.contains("ENOSPC") || msg.contains("No space")) return@synchronized "err:nospace"
+                    return@synchronized "err:io"
+                }
+                h.written += data.size
+                h.lastWriteAt = System.currentTimeMillis()
+                "ok"
+            } catch (e: Exception) {
+                "err:io"
+            }
+        }
+    }
+
+    @android.webkit.JavascriptInterface
+    fun saveClose(handle: String): String {
+        if (!originOk()) return "err:origin"
+        val h = saveHandles.remove(handle) ?: return "err:badhandle"
+        return synchronized(h.lock) {
+            try {
+                if (h.size >= 0 && h.written != h.size) {
+                    // cleanup incomplete
+                    try { h.out?.close() } catch (_: Exception) {}
+                    h.uri?.let { try { appCtx.contentResolver.delete(it, null, null) } catch (_: Exception) {} }
+                    h.file?.delete()
+                    ledgerRemove(handle)
+                    releaseService()
+                    return@synchronized "err:size"
+                }
+                try {
+                    h.out?.flush()
+                    h.out?.close()
+                } catch (e: Exception) {
+                    val msg = e.message ?: ""
+                    try { h.uri?.let { appCtx.contentResolver.delete(it, null, null) } } catch (_: Exception) {}
+                    try { h.file?.delete() } catch (_: Exception) {}
+                    ledgerRemove(handle)
+                    releaseService()
+                    return@synchronized if (msg.contains("ENOSPC") || msg.contains("No space")) "err:nospace" else "err:io"
+                }
+                h.out = null
+                var finalName = h.name
+                if (android.os.Build.VERSION.SDK_INT >= 29 && h.uri != null) {
+                    val cv = android.content.ContentValues()
+                    cv.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+                    appCtx.contentResolver.update(h.uri!!, cv, null, null)
+                    try {
+                        appCtx.contentResolver.query(h.uri!!, arrayOf(android.provider.MediaStore.Downloads.DISPLAY_NAME), null, null, null)?.use { c ->
+                            val i = c.getColumnIndex(android.provider.MediaStore.Downloads.DISPLAY_NAME)
+                            if (c.moveToFirst() && i >= 0) finalName = c.getString(i) ?: finalName
+                        }
+                    } catch (_: Exception) {}
+                } else if (h.file != null) {
+                    val dest = java.io.File(h.file!!.parentFile, h.name)
+                    if (dest.exists()) {
+                        // simple unique
+                        var n = 1
+                        val dot = h.name.lastIndexOf('.')
+                        val base = if (dot > 0) h.name.substring(0, dot) else h.name
+                        val ext = if (dot > 0) h.name.substring(dot) else ""
+                        var d = dest
+                        while (d.exists() && n < 999) {
+                            d = java.io.File(h.file!!.parentFile, "$base ($n)$ext")
+                            n++
+                        }
+                        h.file!!.renameTo(d)
+                        finalName = d.name
+                    } else {
+                        h.file!!.renameTo(dest)
+                        finalName = dest.name
+                    }
+                    try {
+                        android.media.MediaScannerConnection.scanFile(appCtx, arrayOf(java.io.File(h.file!!.parentFile, finalName).absolutePath), null, null)
+                    } catch (_: Exception) {}
+                }
+                ledgerRemove(handle)
+                releaseService()
+                "ok:$finalName"
+            } catch (e: Exception) {
+                val msg = e.message ?: ""
+                try { h.out?.close() } catch (_: Exception) {}
+                try { h.uri?.let { appCtx.contentResolver.delete(it, null, null) } } catch (_: Exception) {}
+                try { h.file?.delete() } catch (_: Exception) {}
+                ledgerRemove(handle)
+                releaseService()
+                if (msg.contains("ENOSPC") || msg.contains("No space")) "err:nospace" else "err:io"
+            }
+        }
+    }
+
+    @android.webkit.JavascriptInterface
+    fun saveAbort(handle: String): String {
+        if (!originOk()) return "err:origin"
+        return saveAbortInternal(handle)
+    }
+
+    private fun saveAbortInternal(handle: String): String {
+        val h = saveHandles.remove(handle) ?: return "ok"
+        synchronized(h.lock) {
+            try { h.out?.close() } catch (_: Exception) {}
+            try { h.uri?.let { appCtx.contentResolver.delete(it, null, null) } } catch (_: Exception) {}
+            try { h.file?.delete() } catch (_: Exception) {}
+        }
+        ledgerRemove(handle)
+        releaseService()
+        return "ok"
+    }
+
     fun isBusy(): Boolean {
-        return server?.isRunning() == true || fetcher?.isActive() == true
+        return server?.isRunning() == true || fetcher?.isActive() == true || saveHandles.isNotEmpty()
     }
 
     fun release() {
+        for (id in saveHandles.keys.toList()) {
+            try { saveAbortInternal(id) } catch (_: Exception) {}
+        }
         try { server?.stop() } catch (_: Exception) {}
         try { fetcher?.cancel() } catch (_: Exception) {}
-        LanService.stop(appCtx)
+        serviceHold.set(0)
+        try { LanService.stop(appCtx) } catch (_: Exception) {}
     }
 
     companion object {
         const val REQ_LAN_FILES = 5
+        private val ledgerCleaned = java.util.concurrent.atomic.AtomicBoolean(false)
+        @Volatile private var watcherStop = false
+        @Volatile private var watcherStarted = false
+        private val watcherLock = Any()
     }
 }

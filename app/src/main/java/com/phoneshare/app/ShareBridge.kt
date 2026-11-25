@@ -172,6 +172,18 @@ class ShareBridge(
     }
 
     @JavascriptInterface
+    fun refresh(): String {
+        if (!originOk()) return badOrigin()
+        if (!NativeShare.isCapturing()) return "err:idle"
+        main.post {
+            try { NativeShare.refresh() } catch (e: Throwable) {
+                Logx.add("ShareBridge.refresh: " + e.message)
+            }
+        }
+        return "ok"
+    }
+
+    @JavascriptInterface
     fun rc(text: String): String {
         if (!originOk()) return badOrigin()
         if (!ControlHandler.serviceEnabled() &&

@@ -25,6 +25,11 @@ input,textarea{width:100%;box-sizing:border-box;margin:4px 0;background:#222;col
 <button onclick="doFetch()">fetch</button>
 <button onclick="doCancel()">cancel</button>
 <button onclick="doBadToken()">错 token</button>
+<button onclick="doSaveProbe()">分块保存200MB探针</button>
+<button onclick="doSaveAbort()">saveAbort</button>
+<button onclick="doSaveSizeMismatch()">err:size</button>
+<button onclick="doSaveBadOffset()">err:offset</button>
+<button onclick="doSaveTooMany()">err:toomany</button>
 </div>
 <div id="log"></div>
 <script>
@@ -81,6 +86,63 @@ function doBadToken(){
   }catch(e){L(String(e))}
 }
 L('version='+(api()?api().version():'no'));
+var saveH=null,saveOff=0;
+function crc32(buf){var c=~0>>>0;for(var i=0;i<buf.length;i++){c^=buf[i];for(var k=0;k<8;k++)c=(c>>>1)^(0xedb88320&(-(c&1)));}return(~c)>>>0;}
+function u8ToB64(a){var s='',i=0;while(i<a.length){var n=Math.min(8192,a.length-i);var sl=a.subarray(i,i+n);s+=String.fromCharCode.apply(null,sl);i+=n;}return btoa(s)}
+function doSaveProbe(){
+  try{
+    var total=200*1024*1024, chunk=512*1024, seed=12345;
+    function rnd(){seed=(seed*1103515245+12345)&0x7fffffff;return seed&255;}
+    var r=api().saveOpen('lan-probe-200m.bin', total);
+    L('saveOpen '+r);
+    if(String(r).indexOf('ok:')!==0)return;
+    saveH=String(r).slice(3);saveOff=0;var crc=~0>>>0,left=total;
+    function step(){
+      if(left<=0){
+        var c=api().saveClose(saveH);
+        L('saveClose '+c+' bytes='+saveOff+' crc32='+(crc>>>0));
+        return;
+      }
+      var n=Math.min(chunk,left);var a=new Uint8Array(n);
+      for(var i=0;i<n;i++){a[i]=rnd();crc^=a[i];for(var k=0;k<8;k++)crc=(crc>>>1)^(0xedb88320&(-(crc&1)));}
+      crc=crc>>>0;
+      var w=api().saveWrite(saveH,saveOff,u8ToB64(a));
+      if(w!=='ok'){L('saveWrite '+w+' at '+saveOff);return;}
+      saveOff+=n;left-=n;
+      if(saveOff%(5*1024*1024)===0)L('written '+saveOff+' crc='+(crc>>>0));
+      setTimeout(step,0);
+    }
+    step();
+  }catch(e){L(String(e))}
+}
+function doSaveAbort(){try{L('abort '+api().saveAbort(saveH||''))}catch(e){L(String(e))}}
+function doSaveSizeMismatch(){
+  try{
+    var r=api().saveOpen('size-mismatch.bin',100);
+    L('open '+r);if(String(r).indexOf('ok:')!==0)return;
+    var h=String(r).slice(3);
+    var a=new Uint8Array(10);var w=api().saveWrite(h,0,u8ToB64(a));L('write '+w);
+    L('close expect err:size -> '+api().saveClose(h));
+  }catch(e){L(String(e))}
+}
+function doSaveBadOffset(){
+  try{
+    var r=api().saveOpen('bad-offset.bin',100);
+    L('open '+r);if(String(r).indexOf('ok:')!==0)return;
+    var h=String(r).slice(3);
+    L('write offset1 expect err:offset -> '+api().saveWrite(h,1,u8ToB64(new Uint8Array(1))));
+    api().saveAbort(h);
+  }catch(e){L(String(e))}
+}
+function doSaveTooMany(){
+  try{
+    var a=api().saveOpen('t1.bin',10),b=api().saveOpen('t2.bin',10),c=api().saveOpen('t3.bin',10);
+    L('h1='+a+' h2='+b+' h3 expect err:toomany -> '+c);
+    try{api().saveAbort(String(a).slice(3))}catch(e){}
+    try{api().saveAbort(String(b).slice(3))}catch(e){}
+  }catch(e){L(String(e))}
+}
+
 </script>
 </body>
 </html>
