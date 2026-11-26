@@ -165,6 +165,7 @@ public class ChatActivity extends Activity {
     private SharedPreferences prefs;
     private ShareBridge shareBridge;
     private NativeLan nativeLan;
+    private NativeRelay nativeRelay;
     private AlertDialog settingsDialog;
     private android.widget.Button btnControlPerm;
     private android.widget.Button btnOverlayPerm;
@@ -352,6 +353,7 @@ public class ChatActivity extends Activity {
             try {
                 if (shareBridge != null) shareBridge.release();
                 if (nativeLan != null) nativeLan.release();
+                if (nativeRelay != null) nativeRelay.release();
             } catch (Throwable ignored) {}
         }
         super.onDestroy();
@@ -526,6 +528,20 @@ public class ChatActivity extends Activity {
         });
         webView.addJavascriptInterface(nativeLan, "NativeLan");
         if (nativeLan != null) nativeLan.setMainUrl(chatUrl);
+        nativeRelay = new NativeRelay(this, webView, new NativeLan.HostsProvider() {
+            @Override
+            public java.util.Set<String> allowedHosts() {
+                java.util.HashSet<String> s = new java.util.HashSet<String>();
+                if (chatHost.length() > 0) s.add(chatHost);
+                if (videoHost.length() > 0) s.add(videoHost);
+                String vh = hostOf(videoUrl);
+                if (vh.length() > 0) s.add(vh);
+                synchronized (runtimeHosts) { s.addAll(runtimeHosts); }
+                return s;
+            }
+        }, nativeLan);
+        webView.addJavascriptInterface(nativeRelay, "NativeRelay");
+        if (nativeRelay != null) nativeRelay.setMainUrl(chatUrl);
 
         try {
             if (Build.VERSION.SDK_INT >= 26) {
@@ -814,7 +830,8 @@ public class ChatActivity extends Activity {
                         d.dismiss();
                         boolean busy = inCall
                                 || NativeShare.INSTANCE.isCapturing()
-                                || (nativeLan != null && nativeLan.isBusy());
+                                || (nativeLan != null && nativeLan.isBusy())
+                                || (nativeRelay != null && nativeRelay.isBusy());
                         boolean willReload = false;
                         if (!addrChanged) {
                             toast("已保存");
@@ -927,6 +944,7 @@ public class ChatActivity extends Activity {
             super.onPageStarted(view, url, favicon);
             if (shareBridge != null) shareBridge.setMainUrl(url);
             if (nativeLan != null) nativeLan.setMainUrl(url);
+            if (nativeRelay != null) nativeRelay.setMainUrl(url);
             webView.setKeepScreenOn(false);
             inCall = false;
         }
@@ -936,6 +954,7 @@ public class ChatActivity extends Activity {
             super.onPageFinished(view, url);
             if (shareBridge != null) shareBridge.setMainUrl(url);
             if (nativeLan != null) nativeLan.setMainUrl(url);
+            if (nativeRelay != null) nativeRelay.setMainUrl(url);
             noteRuntimeHost(url);
             runJs(HOOK_JS);
             runJs("window.__vurl=" + JSONObject.quote(videoUrl) + ";");
@@ -949,6 +968,7 @@ public class ChatActivity extends Activity {
             super.doUpdateVisitedHistory(view, url, isReload);
             if (shareBridge != null) shareBridge.setMainUrl(url);
             if (nativeLan != null) nativeLan.setMainUrl(url);
+            if (nativeRelay != null) nativeRelay.setMainUrl(url);
         }
 
         @TargetApi(23)

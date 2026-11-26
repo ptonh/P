@@ -432,13 +432,13 @@ class NativeLan(
         val lock: Any = Any()
     )
 
-    private fun holdService() {
+    internal fun holdService() {
         if (serviceHold.getAndIncrement() == 0) {
             try { LanService.start(appCtx) } catch (_: Exception) {}
         }
     }
 
-    private fun releaseService() {
+    internal fun releaseService() {
         val v = serviceHold.decrementAndGet()
         if (v <= 0) {
             serviceHold.set(0)
@@ -508,6 +508,10 @@ class NativeLan(
     @android.webkit.JavascriptInterface
     fun saveOpen(name: String, size: Long): String {
         if (!originOk()) return "err:origin"
+        return saveOpenInternal(name, size)
+    }
+
+    internal fun saveOpenInternal(name: String, size: Long): String {
         if (saveHandles.size >= 2) return "err:toomany"
         return try {
             val safe = LanFetcher.sanitizeName(name)
@@ -586,9 +590,34 @@ class NativeLan(
         }
     }
 
+    internal fun saveWriteBytes(handle: String, data: ByteArray): String {
+        val h = saveHandles[handle] ?: return "err:badhandle"
+        return synchronized(h.lock) {
+            try {
+                if (data.size > 1024 * 1024) return@synchronized "err:big"
+                try {
+                    h.out?.write(data)
+                } catch (e: Exception) {
+                    val msg = e.message ?: ""
+                    if (msg.contains("ENOSPC") || msg.contains("No space")) return@synchronized "err:nospace"
+                    return@synchronized "err:io"
+                }
+                h.written += data.size
+                h.lastWriteAt = System.currentTimeMillis()
+                "ok"
+            } catch (e: Exception) {
+                "err:io"
+            }
+        }
+    }
+
     @android.webkit.JavascriptInterface
     fun saveClose(handle: String): String {
         if (!originOk()) return "err:origin"
+        return saveCloseInternal(handle)
+    }
+
+    internal fun saveCloseInternal(handle: String): String {
         val h = saveHandles.remove(handle) ?: return "err:badhandle"
         return synchronized(h.lock) {
             try {
@@ -668,7 +697,7 @@ class NativeLan(
         return saveAbortInternal(handle)
     }
 
-    private fun saveAbortInternal(handle: String): String {
+    internal fun saveAbortInternal(handle: String): String {
         val h = saveHandles.remove(handle) ?: return "ok"
         synchronized(h.lock) {
             try { h.out?.close() } catch (_: Exception) {}
@@ -679,6 +708,8 @@ class NativeLan(
         releaseService()
         return "ok"
     }
+
+    internal fun entryOf(id: String): Entry? = table[id]
 
     fun isBusy(): Boolean {
         return server?.isRunning() == true || fetcher?.isActive() == true || saveHandles.isNotEmpty()
