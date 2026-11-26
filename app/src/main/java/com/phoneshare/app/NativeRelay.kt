@@ -52,8 +52,13 @@ class NativeRelay(
     private fun originOk(): Boolean {
         val host = mainHost
         val allowed = hostsProvider.allowedHosts().map { it.lowercase() }.filter { it.isNotEmpty() }.toSet()
-        if (host.isEmpty() || allowed.isEmpty()) return false
-        return allowed.any { a -> host == a || host.endsWith(".$a") }
+        if (host.isEmpty() || allowed.isEmpty()) {
+            Logx.add("NativeRelay origin 拒绝: host=$host allowed=$allowed")
+            return false
+        }
+        val ok = allowed.any { a -> host == a || host.endsWith(".$a") }
+        if (!ok) Logx.add("NativeRelay origin 拒绝: host=$host allowed=$allowed")
+        return ok
     }
 
     /** 统一走 window.__nativeLan */
@@ -180,7 +185,9 @@ class NativeRelay(
 
     @JavascriptInterface
     fun version(): Int {
-        if (!originOk()) return 0
+        val ok = originOk()
+        Logx.add("NativeRelay.version origin=$ok")
+        if (!ok) return 0
         return 1
     }
 
