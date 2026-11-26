@@ -21,7 +21,7 @@ import java.net.DatagramSocket
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 薄封装 RelaySession → 事件经 NativeLan.emit 路径（window.__nativeLan）
+ * 薄封装 RelaySession；事件经 NativeLan.emit → window.__nativeLan
  */
 class NativeRelay(
     private val activity: Context,
@@ -34,6 +34,9 @@ class NativeRelay(
     @Volatile private var mainHost: String = ""
     @Volatile private var currentReq: String = ""
     @Volatile private var session: RelaySession? = null
+    @Volatile private var pendingRate: Int = 2048
+    @Volatile private var lastVer: Int = -1
+    @Volatile private var lastOriginDenyHost: String? = null
     @Volatile private var boundNetwork: Network? = null
     private var networkCb: ConnectivityManager.NetworkCallback? = null
     private val held = AtomicBoolean(false)
@@ -53,26 +56,29 @@ class NativeRelay(
         val host = mainHost
         val allowed = hostsProvider.allowedHosts().map { it.lowercase() }.filter { it.isNotEmpty() }.toSet()
         if (host.isEmpty() || allowed.isEmpty()) {
-            Logx.add("NativeRelay origin 拒绝: host=$host allowed=$allowed")
+            if (lastOriginDenyHost != host) {
+                lastOriginDenyHost = host
+                Logx.add("NativeRelay origin 拒绝: host=$host allowed=$allowed")
+            }
             return false
         }
         val ok = allowed.any { a -> host == a || host.endsWith(".$a") }
-        if (!ok) Logx.add("NativeRelay origin 拒绝: host=$host allowed=$allowed")
+        if (!ok) {
+            if (lastOriginDenyHost != host) {
+                lastOriginDenyHost = host
+                Logx.add("NativeRelay origin 拒绝: host=$host allowed=$allowed")
+            }
+        } else {
+            lastOriginDenyHost = null
+        }
         return ok
     }
 
-    /** 统一走 window.__nativeLan */
     private fun emitLan(obj: JSONObject) {
-        val lit = obj.toString()
-            .replace("\\", "\\\\")
-            .replace("\u2028", "\\u2028")
-            .replace("\u2029", "\\u2029")
-        main.post {
-            try {
-                val js = "(function(){if(window.__nativeLan){window.__nativeLan($lit);return 1}return 0})()"
-                webView.evaluateJavascript(js, null)
-            } catch (_: Throwable) {}
-        }
+        // 复用 NativeLan.emit（只转义 U+2028/2029，不翻倍反斜杠；带 pending 队列）
+        try {
+            nativeLan.emit(obj)
+        } catch (_: Throwable) {}
     }
 
     private fun holdOnce() {
@@ -150,45 +156,15 @@ class NativeRelay(
         return out
     }
 
-    private fun eventsFor(req: String) = object : RelayEvents {
-        override fun onReady(addr: String, keyB64: String) {
-            emitLan(JSONObject().put("e", "relayReady").put("req", req).put("addr", addr).put("key", keyB64))
-        }
-        override fun onOpen(rttMs: Int) {
-            emitLan(JSONObject().put("e", "relayOpen").put("req", req).put("rtt", rttMs))
-        }
-        override fun onFail(reason: String) {
-            emitLan(JSONObject().put("e", "relayFail").put("req", req).put("reason", reason))
-            cleanupSession()
-        }
-        override fun onClosed(why: String) {
-            emitLan(JSONObject().put("e", "relayClosed").put("req", req).put("why", why))
-            cleanupSession()
-        }
-        override fun onMsg(text: String) {
-            emitLan(JSONObject().put("e", "relayMsg").put("req", req).put("text", text))
-        }
-        override fun onProg(fid: String, sending: Boolean, done: Long, total: Long, rateBps: Long, lossPct: Int, rttMs: Int) {
-            emitLan(
-                JSONObject().put("e", "relayProg").put("req", req).put("fid", fid)
-                    .put("done", done).put("total", total).put("rate", rateBps)
-                    .put("loss", lossPct).put("rtt", rttMs)
-            )
-        }
-        override fun onDone(fid: String, sending: Boolean, ok: Boolean, msg: String) {
-            emitLan(JSONObject().put("e", "relayDone").put("req", req).put("fid", fid).put("ok", ok).put("msg", msg))
-        }
-        override fun onStat(sent: Long, recv: Long) {
-            emitLan(JSONObject().put("e", "relayStat").put("req", req).put("sent", sent).put("recv", recv))
-        }
-    }
-
     @JavascriptInterface
     fun version(): Int {
         val ok = originOk()
-        Logx.add("NativeRelay.version origin=$ok")
-        if (!ok) return 0
-        return 1
+        val v = if (ok) 1 else 0
+        if (v != lastVer) {
+            lastVer = v
+            Logx.add("NativeRelay.version origin=$ok")
+        }
+        return v
     }
 
     @JavascriptInterface
@@ -197,14 +173,49 @@ class NativeRelay(
         if (session?.isBusy() == true) return """{"ok":false,"err":"busy"}"""
         currentReq = req
         val r = if (role == "r") "r" else "s"
-        try {
+        return try {
             holdOnce()
             val ice = parseIce(iceJson)
             val cm = appCtx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             boundNetwork = if (Build.VERSION.SDK_INT >= 23) cm.activeNetwork else null
+            val holder = arrayOf<RelaySession?>(null)
             val sess = RelaySession(
                 role = r,
-                ev = eventsFor(req),
+                ev = object : RelayEvents {
+                    private fun stillCurrent(): Boolean =
+                        req == currentReq && session === holder[0]
+
+                    override fun onReady(addr: String, keyB64: String) {
+                        emitLan(JSONObject().put("e", "relayReady").put("req", req).put("addr", addr).put("key", keyB64))
+                    }
+                    override fun onOpen(rttMs: Int) {
+                        emitLan(JSONObject().put("e", "relayOpen").put("req", req).put("rtt", rttMs))
+                    }
+                    override fun onFail(reason: String) {
+                        emitLan(JSONObject().put("e", "relayFail").put("req", req).put("reason", reason))
+                        if (stillCurrent()) cleanupSession()
+                    }
+                    override fun onClosed(why: String) {
+                        emitLan(JSONObject().put("e", "relayClosed").put("req", req).put("why", why))
+                        if (stillCurrent()) cleanupSession()
+                    }
+                    override fun onMsg(text: String) {
+                        emitLan(JSONObject().put("e", "relayMsg").put("req", req).put("text", text))
+                    }
+                    override fun onProg(fid: String, sending: Boolean, done: Long, total: Long, rateBps: Long, lossPct: Int, rttMs: Int) {
+                        emitLan(
+                            JSONObject().put("e", "relayProg").put("req", req).put("fid", fid)
+                                .put("done", done).put("total", total).put("rate", rateBps)
+                                .put("loss", lossPct).put("rtt", rttMs)
+                        )
+                    }
+                    override fun onDone(fid: String, sending: Boolean, ok: Boolean, msg: String) {
+                        emitLan(JSONObject().put("e", "relayDone").put("req", req).put("fid", fid).put("ok", ok).put("msg", msg))
+                    }
+                    override fun onStat(sent: Long, recv: Long) {
+                        emitLan(JSONObject().put("e", "relayStat").put("req", req).put("sent", sent).put("recv", recv))
+                    }
+                },
                 socketFactory = {
                     val s = DatagramSocket()
                     try {
@@ -217,19 +228,22 @@ class NativeRelay(
                 },
                 log = { /* no secrets */ }
             )
+            holder[0] = sess
             session = sess
             registerNet(sess)
+            sess.setRate(pendingRate)
             sess.open(ice)
-            return """{"ok":true}"""
+            """{"ok":true}"""
         } catch (e: Exception) {
             cleanupSession()
-            return """{"ok":false,"err":"io"}"""
+            """{"ok":false,"err":"io"}"""
         }
     }
 
     @JavascriptInterface
     fun connect(req: String, peerJson: String): String {
         if (!originOk()) return """{"ok":false,"err":"origin"}"""
+        if (req != currentReq) return """{"ok":false,"err":"stale"}"""
         val sess = session ?: return """{"ok":false,"err":"idle"}"""
         return try {
             val o = JSONObject(peerJson)
@@ -245,6 +259,7 @@ class NativeRelay(
     @JavascriptInterface
     fun sendMsg(req: String, text: String): String {
         if (!originOk()) return """{"ok":false,"err":"origin"}"""
+        if (req != currentReq) return """{"ok":false,"err":"stale"}"""
         val sess = session ?: return """{"ok":false,"err":"idle"}"""
         return if (sess.sendMsg(text)) """{"ok":true}""" else """{"ok":false,"err":"too_long"}"""
     }
@@ -252,6 +267,7 @@ class NativeRelay(
     @JavascriptInterface
     fun sendFile(req: String, fid: String, fileId: String): String {
         if (!originOk()) return """{"ok":false,"err":"origin"}"""
+        if (req != currentReq) return """{"ok":false,"err":"stale"}"""
         val sess = session ?: return """{"ok":false,"err":"idle"}"""
         val entry = nativeLan.entryOf(fileId)
         if (entry == null) {
@@ -260,7 +276,6 @@ class NativeRelay(
         }
         var size = entry.size
         if (size <= 0L) {
-            // 试读 1 字节：有数据 = 读不到大小；无数据 = 空文件
             try {
                 appCtx.contentResolver.openInputStream(entry.uri)?.use { ins ->
                     val one = ByteArray(1)
@@ -284,8 +299,7 @@ class NativeRelay(
             private var ins: InputStream? = null
             override fun read(buf: ByteArray, off: Int, len: Int): Int {
                 if (ins == null) {
-                    ins = appCtx.contentResolver.openInputStream(uri)
-                        ?: return -1
+                    ins = appCtx.contentResolver.openInputStream(uri) ?: return -1
                 }
                 return try {
                     ins!!.read(buf, off, len)
@@ -300,7 +314,7 @@ class NativeRelay(
         }
         val ok = sess.sendFile(fid, size, src)
         if (!ok) {
-            emitLan(JSONObject().put("e", "relayDone").put("req", req).put("fid", fid).put("ok", false).put("msg", "上一个文件还没传完"))
+            emitLan(JSONObject().put("e", "relayDone").put("req", req).put("fid", fid).put("ok", false).put("msg", "通道还没连通"))
         }
         return """{"ok":true}"""
     }
@@ -308,6 +322,7 @@ class NativeRelay(
     @JavascriptInterface
     fun recvFile(req: String, fid: String, name: String, size: Long): String {
         if (!originOk()) return """{"ok":false,"err":"origin"}"""
+        if (req != currentReq) return """{"ok":false,"err":"stale"}"""
         val sess = session ?: return """{"ok":false,"err":"idle"}"""
         val open = nativeLan.saveOpenInternal(name, size)
         if (!open.startsWith("ok:")) {
@@ -334,7 +349,7 @@ class NativeRelay(
         val ok = sess.recvFile(fid, size, sink)
         if (!ok) {
             try { nativeLan.saveAbortInternal(handle) } catch (_: Exception) {}
-            emitLan(JSONObject().put("e", "relayDone").put("req", req).put("fid", fid).put("ok", false).put("msg", "上一个文件还没传完"))
+            emitLan(JSONObject().put("e", "relayDone").put("req", req).put("fid", fid).put("ok", false).put("msg", "通道还没连通"))
         }
         return """{"ok":true}"""
     }
@@ -342,6 +357,7 @@ class NativeRelay(
     @JavascriptInterface
     fun cancel(req: String, fid: String): String {
         if (!originOk()) return """{"ok":false,"err":"origin"}"""
+        if (req != currentReq) return """{"ok":false,"err":"stale"}"""
         session?.cancel(fid)
         return """{"ok":true}"""
     }
@@ -349,8 +365,8 @@ class NativeRelay(
     @JavascriptInterface
     fun close(req: String): String {
         if (!originOk()) return """{"ok":false,"err":"origin"}"""
+        if (req != currentReq) return """{"ok":true}"""
         try { session?.close() } catch (_: Exception) {}
-        // close 本地主动不再回调 onClosed；仍做清理
         cleanupSession()
         return """{"ok":true}"""
     }
@@ -358,13 +374,13 @@ class NativeRelay(
     @JavascriptInterface
     fun setRate(kbps: Int): String {
         if (!originOk()) return """{"ok":false,"err":"origin"}"""
-        session?.setRate(kbps)
+        pendingRate = kbps.coerceIn(64, 20480)
+        session?.setRate(pendingRate)
         return """{"ok":true}"""
     }
 
     fun isBusy(): Boolean = session?.isBusy() == true
 
-    /** 主线程调用：只调 session.close()，不碰 socket */
     fun release() {
         try { session?.close() } catch (_: Exception) {}
         cleanupSession()
