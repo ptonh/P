@@ -185,17 +185,19 @@ class NativeRelay(
                     private fun stillCurrent(): Boolean =
                         req == currentReq && session === holder[0]
 
-                    override fun onReady(addr: String, keyB64: String) {
-                        emitLan(JSONObject().put("e", "relayReady").put("req", req).put("addr", addr).put("key", keyB64))
+                    override fun onReady(addr: String, keyB64: String, via: String) {
+                        emitLan(JSONObject().put("e", "relayReady").put("req", req).put("addr", addr).put("key", keyB64).put("via", via))
                     }
                     override fun onOpen(rttMs: Int) {
                         emitLan(JSONObject().put("e", "relayOpen").put("req", req).put("rtt", rttMs))
                     }
                     override fun onFail(reason: String) {
+                        Logx.add("NativeRelay onFail t=" + System.currentTimeMillis() + " reason=" + reason)
                         emitLan(JSONObject().put("e", "relayFail").put("req", req).put("reason", reason))
                         if (stillCurrent()) cleanupSession()
                     }
                     override fun onClosed(why: String) {
+                        Logx.add("NativeRelay onClosed t=" + System.currentTimeMillis() + " why=" + why)
                         emitLan(JSONObject().put("e", "relayClosed").put("req", req).put("why", why))
                         if (stillCurrent()) cleanupSession()
                     }

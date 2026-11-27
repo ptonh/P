@@ -18,6 +18,7 @@ class FakeTurn(val user: String = "u", val pass: String = "p", val realm: String
     val addr = InetSocketAddress("127.0.0.1", sock.localPort)
 
     // 故障开关
+    @Volatile var respDelayMs = 0L             // 响应延迟这么久再发（异步，不阻塞别的请求）
     @Volatile var mute = false                 // 不回任何 STUN 响应
     @Volatile var dropResponses = 0            // 吞掉接下来 N 个响应（模拟丢包，验证重传）
     @Volatile var corruptSuccessMi = false     // 成功响应带错误的 MESSAGE-INTEGRITY
@@ -60,6 +61,8 @@ class FakeTurn(val user: String = "u", val pass: String = "p", val realm: String
     private fun reply(to: InetSocketAddress, pkt: ByteArray) {
         if (mute) return
         if (dropResponses > 0) { dropResponses--; return }
+        val d = respDelayMs
+        if (d > 0) { Thread { try { Thread.sleep(d); if (!mute) sock.send(DatagramPacket(pkt, pkt.size, to)) } catch (_: Exception) {} }.also { it.isDaemon = true }.start(); return }
         try { sock.send(DatagramPacket(pkt, pkt.size, to)) } catch (_: Exception) {}
     }
 

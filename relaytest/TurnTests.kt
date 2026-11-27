@@ -51,6 +51,10 @@ fun stunTests() {
         val p = Stun.parseXorAddr(a.value)
         check(p == ("203.0.113.7" to 54321)) { "got $p" }
     }
+    case("pickAllUdpTurnUrls：保持顺序、去重、排除 turns: 和 tcp") {
+        val l = TurnClient.pickAllUdpTurnUrls(listOf("turns:a:443", "turn:1.2.3.4:3478?transport=udp", "turn:5.6.7.8:3478?transport=udp", "turn:1.2.3.4:3478", "turn:9.9.9.9:3478?transport=tcp"))
+        check(l.size == 2 && l[0].host == "1.2.3.4" && l[1].host == "5.6.7.8") { "实际 ${l.map { it.host }}" }
+    }
     case("pickUdpTurnUrl：排除 turns: 和 transport=tcp") {
         val p = TurnClient.pickUdpTurnUrl(listOf("turns:a:443?transport=tcp", "turn:b:3478?transport=tcp", "turn:c.example.com:3479?transport=udp"))
         check(p != null && p.host == "c.example.com" && p.port == 3479) { "got ${p?.host}:${p?.port}" }

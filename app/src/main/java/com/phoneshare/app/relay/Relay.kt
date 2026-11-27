@@ -9,7 +9,7 @@ class IceServer(val urls: List<String>, val username: String, val credential: St
 /** 回调线程不固定（后台线程 / 调度线程），不要阻塞；NativeRelay 里转成 JSON 事件即可。 */
 interface RelayEvents {
     /** 本端中继地址；key 只有 role="s" 才非空（base64，32 字节）。 */
-    fun onReady(addr: String, keyB64: String)
+    fun onReady(addr: String, keyB64: String, via: String)   // via = "domain"（域名）或 "ip"（备用 IP）
     fun onOpen(rttMs: Int)
     fun onFail(reason: String)
     fun onClosed(why: String)
@@ -22,7 +22,12 @@ interface RelayEvents {
 
 class RelayCfg(
     val rudp: RudpConfig = RudpConfig(),
-    val turn: TurnConfig = TurnConfig()
+    val turn: TurnConfig = TurnConfig(),       // turn.allocateTotalMs = open 整体最长时间（20 秒）
+    val backupDelayMs: Long = 1500,            // 域名还没出结果时，从 open 起这么久后并行开始试备用 IP
+    val backupGapMs: Long = 300,               // 相邻两次尝试的启动间隔
+    val maxParallel: Int = 4,                  // 同时在飞的尝试数
+    val attemptMs: Long = 5000,                // 单次 Allocate 尝试的超时（含 401 带凭证重试）
+    val dnsTimeoutMs: Long = 3000
 )
 
 /**
@@ -37,7 +42,8 @@ class RelaySession(
     private val ev: RelayEvents,
     private val cfg: RelayCfg = RelayCfg(),
     private val socketFactory: () -> DatagramSocket = { DatagramSocket() },
-    private val log: (String) -> Unit = {}
+    private val log: (String) -> Unit = {},
+    private val dns: (String) -> List<String> = { TurnClient.resolveAllV4(it) }   // 域名 → IPv4 列表；失败抛异常（测试可注入）
 ) {
     private val lock = Any()
     private var turn: TurnClient? = null
@@ -59,33 +65,133 @@ class RelaySession(
     }
 
     // ------------------------------------------------------------ open：Allocate
-    /** 异步。成功 → onReady；失败 → onFail（并释放）。 */
+    private class Win(val tc: TurnClient, val addr: String, val via: String)
+    private class Cand(val ip: String, val port: Int, val via: String) { val key get() = "$ip:$port" }
+    private class QDns(val ok: Boolean, val ips: List<String>, val port: Int)
+    private class QFail(val e: TurnException)
+    private class QWin(val w: Win)
+    private object QDone
+
+    /** 异步。成功 → onReady（带 via）；失败 → onFail（并释放）。 */
     fun open(ice: List<IceServer>) {
         Thread {
-            try {
-                val urls = ArrayList<String>(); var user = ""; var pass = ""
-                for (s in ice) {
-                    urls.addAll(s.urls)
-                    if (user.isEmpty() && s.username.isNotEmpty()) { user = s.username; pass = s.credential }
-                }
-                val picked = TurnClient.pickUdpTurnUrl(urls) ?: throw TurnException("没有可用的中继地址")
-                val ip = TurnClient.resolveV4(picked.host)
-                val tc = TurnClient(InetSocketAddress(ip, picked.port), user, pass, cfg.turn, socketFactory, log)
-                synchronized(lock) { if (ended) { tc.close(); return@Thread }; turn = tc }
-                tc.onFatal = { why -> terminate(why, true) }
-                val addr = tc.allocate()
-                var keyB64 = ""
-                if (role == "s") {
-                    val k = randomKey(); ownKey = k
-                    keyB64 = java.util.Base64.getEncoder().encodeToString(k)
-                }
-                if (!ended) ev.onReady(addr, keyB64)
-            } catch (e: TurnException) {
-                terminate(e.message ?: "分配失败", false)
-            } catch (e: Exception) {
-                terminate("分配失败", false)
-            }
+            try { doOpen(ice) }
+            catch (e: TurnException) { terminate(e.message ?: "分配失败", false) }
+            catch (e: Exception) { terminate("分配失败", false) }
         }.also { it.isDaemon = true; it.name = "relay-open" }.start()
+    }
+
+    /**
+     * 域名先试；t=backupDelayMs 起并行试备用 IP（相隔 backupGapMs，同时最多 maxParallel 个）；每次尝试 attemptMs 超时；
+     * 第一个拿到中继地址的是赢家，晚到的成功者立刻 Refresh(0) 释放。整体最长 turn.allocateTotalMs。
+     * 没有域名地址（旧服务器 / 只有 IP）或域名解析已全部失败时，备用 IP 不再等 backupDelayMs，立刻开始。
+     */
+    private fun doOpen(ice: List<IceServer>) {
+        val urls = ArrayList<String>(); var user = ""; var pass = ""
+        for (s in ice) {
+            urls.addAll(s.urls)
+            if (user.isEmpty() && s.username.isNotEmpty()) { user = s.username; pass = s.credential }
+        }
+        val ipRe = Regex("^\\d{1,3}(\\.\\d{1,3}){3}$")
+        val picks = TurnClient.pickAllUdpTurnUrls(urls).filter { !it.host.contains(':') }   // 忽略 IPv6 字面量
+        if (picks.isEmpty()) throw TurnException("没有可用的中继地址")
+        val domains = picks.filter { !ipRe.matches(it.host) }
+        val bakQ = java.util.ArrayDeque<Cand>(picks.filter { ipRe.matches(it.host) }.map { Cand(it.host, it.port, "ip") })
+        val hasBackups = bakQ.isNotEmpty()
+        val domQ = java.util.ArrayDeque<Cand>()
+        val t0 = System.currentTimeMillis()
+        val deadline = t0 + cfg.turn.allocateTotalMs
+        val q = java.util.concurrent.LinkedBlockingQueue<Any>()
+        val win = java.util.concurrent.atomic.AtomicReference<Win?>(null)
+        val done = AtomicBoolean(false)
+        val attemptCfg = cfg.turn.withAllocateTotal(cfg.attemptMs)
+        val started = HashSet<String>()
+        var inFlight = 0; var lastStart = t0 - cfg.backupGapMs - 1
+        var dnsPending = domains.size; var dnsFails = 0
+        var authErr = false; var quotaErr = false; var otherCode = 0
+        var tried = 0
+
+        for (d in domains) Thread {
+            val res = java.util.concurrent.atomic.AtomicReference<List<String>?>(null)
+            val th = Thread { try { res.set(dns(d.host)) } catch (_: Throwable) {} }.also { it.isDaemon = true; it.start() }
+            try { th.join(cfg.dnsTimeoutMs) } catch (_: InterruptedException) {}
+            val ips = res.get()
+            q.put(QDns(!ips.isNullOrEmpty(), ips ?: emptyList(), d.port))
+        }.also { it.isDaemon = true; it.name = "relay-dns" }.start()
+
+        fun start(c: Cand) {
+            started.add(c.key); inFlight++; tried++
+            log("中继尝试 #$tried（${if (c.via == "domain") "域名" else "备用地址"}）")
+            Thread {
+                var tc: TurnClient? = null
+                try {
+                    tc = TurnClient(InetSocketAddress(java.net.InetAddress.getByName(c.ip), c.port), user, pass, attemptCfg, socketFactory, log)
+                    val addr = tc.allocate()
+                    val w = Win(tc, addr, c.via)
+                    if (!done.get() && win.compareAndSet(null, w)) q.put(QWin(w))
+                    else { tc.releaseAndClose(); q.put(QDone) }      // 晚到的成功者：释放，不占账号连接数
+                } catch (e: TurnException) { tc?.close(); q.put(QFail(e)) }
+                catch (e: Exception) { tc?.close(); q.put(QFail(TurnException("分配失败"))) }
+            }.also { it.isDaemon = true; it.name = "relay-try" }.start()
+        }
+
+        var winner: Win? = null
+        while (true) {
+            if (ended) { done.set(true); return }
+            val now = System.currentTimeMillis()
+            if (now >= deadline) break
+            val dnsAllFailed = domains.isNotEmpty() && dnsPending == 0 && dnsFails == domains.size
+            val backupsOpen = domains.isEmpty() || dnsAllFailed || now - t0 >= cfg.backupDelayMs
+            var wait = minOf(deadline - now, 200L)
+            if (inFlight < cfg.maxParallel) {
+                val gapLeft = lastStart + cfg.backupGapMs - now
+                val next = if (domQ.isNotEmpty()) domQ.peekFirst() else if (bakQ.isNotEmpty() && backupsOpen) bakQ.peekFirst() else null
+                if (next != null) {
+                    if (gapLeft <= 0) {
+                        if (domQ.isNotEmpty()) domQ.pollFirst() else bakQ.pollFirst()
+                        if (!started.contains(next.key)) { start(next); lastStart = now }
+                        continue
+                    }
+                    wait = minOf(wait, gapLeft)
+                } else if (bakQ.isNotEmpty()) wait = minOf(wait, t0 + cfg.backupDelayMs - now)
+            }
+            if (inFlight == 0 && domQ.isEmpty() && bakQ.isEmpty() && dnsPending == 0) break
+            val item = q.poll(maxOf(wait, 1L), java.util.concurrent.TimeUnit.MILLISECONDS) ?: continue
+            when (item) {
+                is QDns -> { dnsPending--; if (item.ok) item.ips.forEach { domQ.add(Cand(it, item.port, "domain")) } else dnsFails++ }
+                is QFail -> {
+                    inFlight--
+                    val e = item.e
+                    if (e.code == 401 || e.code == 403) authErr = true
+                    else if (e.code == 486) quotaErr = true
+                    else if (e.code != 0 && otherCode == 0) otherCode = e.code
+                }
+                is QDone -> inFlight--
+                is QWin -> { winner = item.w; break }
+            }
+        }
+        done.set(true)
+        val w = winner ?: win.get()
+        if (w == null) {
+            val dnsAllFailed = domains.isNotEmpty() && dnsFails == domains.size
+            throw TurnException(when {
+                authErr -> "中继服务器拒绝了账号（401/403）"
+                quotaErr -> "中继账号的连接数或额度用光了（486）"
+                otherCode != 0 -> "中继服务器返回错误（$otherCode）"
+                dnsAllFailed && hasBackups -> "域名解析失败，备用地址也没有响应（可能网络屏蔽了 UDP）"
+                dnsAllFailed -> "域名解析失败"
+                else -> "中继服务器没有响应（Allocate 超时）"
+            })
+        }
+        val tc = w.tc
+        synchronized(lock) { if (ended) { Thread { try { tc.releaseAndClose() } catch (_: Exception) {} }.also { it.isDaemon = true }.start(); return }; turn = tc }
+        tc.onFatal = { why -> terminate(why, true) }
+        var keyB64 = ""
+        if (role == "s") {
+            val k = randomKey(); ownKey = k
+            keyB64 = java.util.Base64.getEncoder().encodeToString(k)
+        }
+        if (!ended) ev.onReady(w.addr, keyB64, w.via)
     }
 
     // ------------------------------------------------------------ connect：授权 + 绑定 + 握手

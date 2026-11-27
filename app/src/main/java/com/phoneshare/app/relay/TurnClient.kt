@@ -11,7 +11,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-class TurnException(message: String) : Exception(message)
+/** code = TURN 错误码（0 = 不是 TURN 错误回应）；timeout = 请求超时没有任何回应。 */
+class TurnException(message: String, val code: Int = 0, val timeout: Boolean = false) : Exception(message)
 
 /** 时间参数；单元测试里缩短。 */
 class TurnConfig(
@@ -24,7 +25,9 @@ class TurnConfig(
     val bindRefreshMs: Long = 9 * 60_000,
     val refreshRetryGapMs: Long = 2_000,
     val releaseWaitMs: Long = 1_000
-)
+) {
+    fun withAllocateTotal(ms: Long) = TurnConfig(rtoStartMs, rtoMaxMs, ms, requestTotalMs, allocRefreshMs, permRefreshMs, bindRefreshMs, refreshRetryGapMs, releaseWaitMs)
+}
 
 /**
  * TURN over UDP 客户端（ChannelData），纯 Kotlin。
@@ -73,16 +76,18 @@ class TurnClient(
         socket = s
         startReceiver(s)
         // 1) 无凭证试探，拿 realm / nonce
+        val t0 = System.currentTimeMillis()
         var resp = transact(cfg.allocateTotalMs) { tx ->
             Stun.build(Stun.ALLOCATE_REQUEST, tx, listOf(Stun.requestedTransportUdp()))
-        } ?: throw TurnException("中继服务器没有响应")
+        } ?: throw TurnException("中继服务器没有响应", timeout = true)
         if (resp.type == Stun.ALLOCATE_ERROR && resp.errorCode() == 401) {
             realm = resp.str(Stun.ATTR_REALM) ?: ""
             nonce = resp.str(Stun.ATTR_NONCE) ?: ""
             key = Stun.longTermKey(user, realm, pass)
-            resp = authed(Stun.ALLOCATE_REQUEST, listOf(Stun.requestedTransportUdp()), cfg.allocateTotalMs, true)
+            // 一次尝试（含 401 带凭证重试那一轮）总共不超过 allocateTotalMs
+            resp = authed(Stun.ALLOCATE_REQUEST, listOf(Stun.requestedTransportUdp()), maxOf(800L, cfg.allocateTotalMs - (System.currentTimeMillis() - t0)), true)
         } else if (resp.type == Stun.ALLOCATE_ERROR) {
-            throw TurnException(errorReason(resp.errorCode() ?: 0, false))
+            throw TurnException(errorReason(resp.errorCode() ?: 0, false), resp.errorCode() ?: 0)
         }
         if (resp.type != Stun.ALLOCATE_SUCCESS) throw TurnException("分配失败")
         val addr = Stun.parseXorAddr(resp.get(Stun.ATTR_XOR_RELAYED_ADDRESS))
@@ -248,7 +253,7 @@ class TurnClient(
         var tries = 0
         while (true) {
             val r = transact(totalMs) { tx -> authedBytes(type, extra, tx) }
-                ?: throw TurnException(if (allocate) "中继服务器没有响应" else "中继服务器没有响应（${typeName(type)}）")
+                ?: throw TurnException(if (allocate) "中继服务器没有响应" else "中继服务器没有响应（${typeName(type)}）", timeout = true)
             if (r.isSuccess) return r
             val code = r.errorCode() ?: 0
             if (code == 438 && tries < 2) {
@@ -256,7 +261,7 @@ class TurnClient(
                 tries++
                 continue
             }
-            throw TurnException(errorReason(code, true))
+            throw TurnException(errorReason(code, true), code)
         }
     }
 
@@ -317,7 +322,11 @@ class TurnClient(
         class Picked(val host: String, val port: Int)
 
         /** 只取 turn: 且不带 transport=tcp；排除 turns:。 */
-        fun pickUdpTurnUrl(urls: List<String>): Picked? {
+        fun pickUdpTurnUrl(urls: List<String>): Picked? = pickAllUdpTurnUrls(urls).firstOrNull()
+
+        /** 同上，但按原顺序返回全部（去重），用于第一个不响应时换下一个。 */
+        fun pickAllUdpTurnUrls(urls: List<String>): List<Picked> {
+            val out = ArrayList<Picked>()
             for (u in urls) {
                 val s = u.trim()
                 if (s.startsWith("turns:", true) || !s.startsWith("turn:", true)) continue
@@ -337,9 +346,16 @@ class TurnClient(
                     if (idx > 0) { host = rest.substring(0, idx); port = rest.substring(idx + 1).toIntOrNull() ?: 3478 }
                     else { host = rest; port = 3478 }
                 }
-                if (host.isNotEmpty()) return Picked(host, port)
+                if (host.isNotEmpty() && out.none { it.host.equals(host, true) && it.port == port }) out.add(Picked(host, port))
             }
-            return null
+            return out
+        }
+
+        /** 域名解析出全部 IPv4（字符串）；失败抛 TurnException("域名解析失败")。 */
+        fun resolveAllV4(host: String): List<String> {
+            val l = try { InetAddress.getAllByName(host).filterIsInstance<java.net.Inet4Address>().map { it.hostAddress ?: "" }.filter { it.isNotEmpty() } } catch (_: Exception) { emptyList() }
+            if (l.isEmpty()) throw TurnException("域名解析失败")
+            return l
         }
 
         /** 域名解析成 IPv4；失败抛 TurnException("域名解析失败")。 */

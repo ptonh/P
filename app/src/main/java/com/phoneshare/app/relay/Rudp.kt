@@ -72,7 +72,8 @@ object RudpConst {
 class RudpConfig(
     var userCapKbps: Int = 2048,
     val handshakeTimeoutMs: Long = 30_000,
-    val deadMs: Long = 30_000,
+    val deadMs: Long = 60_000,        // 与网页通道「最长容忍中断 1 分钟」一致
+    val stallGraceMs: Long = 5_000,   // 调度线程停了这么久以上（手机睡眠 / 进程被冻结）：这段时间不算对方没数据
     val keepMs: Long = 15_000,
     val progressMs: Long = 500,
     val statMs: Long = 10_000
@@ -98,7 +99,7 @@ interface RudpSource {
 interface RudpListener {
     fun onOpen(rttMs: Int)
     fun onFail(reason: String)               // 握手失败
-    fun onClosed(why: String)                // 通道结束（对方中断 / 30 秒没有数据 / 本地关闭…）
+    fun onClosed(why: String)                // 通道结束（对方中断 / 60 秒没有数据 / 本地关闭…）
     fun onMessage(text: String)
     fun onProgress(xid: Int, sending: Boolean, done: Long, total: Long, rateBps: Long, lossPct: Int, rttMs: Int)
     fun onFileDone(xid: Int, sending: Boolean, ok: Boolean, msg: String)
@@ -225,6 +226,7 @@ class RudpChannel(
     private var nextPn = 1
     private var lastSendAt = 0L
     private var lastRecvAt = 0L
+    private var lastTickAt = 0L
     private var hsStartAt = 0L
     private var peerSeen = false
     private var peerSeenAt = 0L
@@ -1015,8 +1017,12 @@ class RudpChannel(
         tickTimer = null
         if (state == 3) return
         val now = sched.now()
+        val stalled = lastTickAt != 0L && now - lastTickAt > cfg.stallGraceMs
+        lastTickAt = now
         if (state == 2) {
-            if (now - lastRecvAt >= cfg.deadMs) { doClose("30 秒没有数据", false); return }
+            // 本端自己停过（慢滴答本该 1 秒一次）：对方的包可能还堵在系统缓冲里，重新给一个完整窗口
+            if (stalled) lastRecvAt = now
+            if (now - lastRecvAt >= cfg.deadMs) { doClose("${cfg.deadMs / 1000} 秒没有数据", false); return }
             if (now - lastSendAt >= cfg.keepMs) emit(RudpConst.T_KEEP, ByteArray(0))
         }
         tickTimer = sched.after(1000, Runnable { slowTick() })

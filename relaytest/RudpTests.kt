@@ -84,13 +84,13 @@ fun rudpMoreTests() {
         check(n.recA.closedWhy == null && n.recB.closedWhy == null) { "不应断开 ${diag(n)}" }
         println("    ${speedLine(x, 15 * MB)}（含 20 秒断网）")
     }
-    case("断网35秒：超过30秒判定断开，原因「30 秒没有数据」，文件失败") {
+    case("断网很久：超过60秒判定断开，原因「60 秒没有数据」，文件失败") {
         val n = Net(rttMs = 100, bwBytesPerSec = BW_10MBPS); n.open()
-        blackout(n, 8_000, 60_000)
+        blackout(n, 8_000, 150_000)
         val x = Xfer(n, 1, 15 * MB, n.a, n.b, n.recA, n.recB); x.start()
-        n.s.runUntil(120_000) { n.recA.closedWhy != null && n.recB.closedWhy != null }
-        check(n.recA.closedWhy == "30 秒没有数据") { "A=${n.recA.closedWhy}" }
-        check(n.recB.closedWhy == "30 秒没有数据") { "B=${n.recB.closedWhy}" }
+        n.s.runUntil(200_000) { n.recA.closedWhy != null && n.recB.closedWhy != null }
+        check(n.recA.closedWhy == "60 秒没有数据") { "A=${n.recA.closedWhy}" }
+        check(n.recB.closedWhy == "60 秒没有数据") { "B=${n.recB.closedWhy}" }
         check(n.recA.done(1, true)?.ok == false && n.recB.done(1, false)?.ok == false) { "文件应失败 ${diag(n)}" }
         check(x.sink.aborted) { "接收端 sink 应被 abort" }
         check(x.src.closed) { "发送端 source 应被关闭" }
@@ -198,17 +198,34 @@ fun rudpMoreTests() {
         check(n.recB.done(7, false)?.ok == false && n.recA.done(7, true)?.ok == false) { diag(n) }
         check(n.recA.done(7, true)?.msg == "大小不符") { "A=${n.recA.done(7, true)?.msg}" }
     }
-    case("对方消失：整线丢弃后 30 秒判定断开「30 秒没有数据」") {
+    case("对方消失：整线丢弃后 60 秒判定断开「60 秒没有数据」") {
         val n = Net(rttMs = 100, bwBytesPerSec = BW_10MBPS); n.open()
         val x = Xfer(n, 1, 20 * MB, n.a, n.b, n.recA, n.recB); x.start()
         n.s.runFor(3_000)
         val t0 = n.s.t
         n.ab.blackholeFrom = t0; n.ba.blackholeFrom = t0
-        n.s.runUntil(t0 + 60_000) { n.recA.closedWhy != null }
+        n.s.runUntil(t0 + 120_000) { n.recA.closedWhy != null }
         val dt = n.s.t - t0
-        check(n.recA.closedWhy == "30 秒没有数据") { "A=${n.recA.closedWhy}" }
-        check(dt in 29_000..33_000) { "应在约 30 秒后断开，实际 ${dt}ms" }
-        check(n.recA.done(1, true)?.ok == false && n.recA.done(1, true)?.msg == "30 秒没有数据") { diag(n) }
+        check(n.recA.closedWhy == "60 秒没有数据") { "A=${n.recA.closedWhy}" }
+        check(dt in 59_000..63_000) { "应在约 60 秒后断开，实际 ${dt}ms" }
+        check(n.recA.done(1, true)?.ok == false && n.recA.done(1, true)?.msg == "60 秒没有数据") { diag(n) }
+    }
+    case("断网45秒（页面后台常见时长）：不断开，恢复后文件完整") {
+        val n = Net(rttMs = 100, bwBytesPerSec = BW_10MBPS); n.open()
+        blackout(n, 8_000, 53_000)
+        val x = transfer(n, 15 * MB)
+        check(x.ok()) { "失败 ${diag(n)}" }
+        check(n.recA.closedWhy == null && n.recB.closedWhy == null) { "不应断开 ${diag(n)}" }
+    }
+    case("本端被冻结70秒（时钟跳过去、事件没跑）：不误判对方断线，之后消息照常") {
+        val n = Net(rttMs = 100, bwBytesPerSec = BW_10MBPS); n.open()
+        n.s.runFor(2_000)
+        n.s.t += 70_000
+        n.s.runFor(5_000)
+        check(n.recA.closedWhy == null && n.recB.closedWhy == null) { "不应断开 A=${n.recA.closedWhy} B=${n.recB.closedWhy}" }
+        check(n.a.sendMessage("hello"))
+        n.s.runFor(3_000)
+        check(n.recB.messages.any { it.second == "hello" }) { "消息应送达" }
     }
     case("握手：对方不回 → 30 秒后「对方没有回握手」；密钥不一致同样失败") {
         val n = Net(rttMs = 100)
