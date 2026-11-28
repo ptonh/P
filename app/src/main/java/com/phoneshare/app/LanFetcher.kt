@@ -106,6 +106,15 @@ class LanFetcher(private val ctx: Context) {
     }
 
     private fun downloadOne(req: String, base: String, token: String, id: String, name: String, size: Long): Boolean {
+        if (Build.VERSION.SDK_INT < 29) {
+            val hasStore = Build.VERSION.SDK_INT < 23 ||
+                ctx.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!hasStore) {
+                emitErr(req, id, "perm", "没有存储权限：请在系统设置里允许本应用访问存储，然后重试", true)
+                return false
+            }
+        }
         var attempt = 0
         var got = 0L
         var out: OutputStream? = null
@@ -142,6 +151,7 @@ class LanFetcher(private val ctx: Context) {
 
             val url = base.trimEnd('/') + "/f/" + id + "?t=" + token
             while (attempt < 3 && !cancelled.get()) {
+                val gotAtStart = got
                 attempt++
                 try {
                     val conn = openConn(url)
@@ -268,6 +278,7 @@ class LanFetcher(private val ctx: Context) {
                         return true
                     }
                     // incomplete, retry
+                    if (got > gotAtStart) attempt = 0
                 } catch (e: Exception) {
                     currentConn.set(null)
                     if (cancelled.get()) {
@@ -275,6 +286,7 @@ class LanFetcher(private val ctx: Context) {
                         failCleanup(uri, tmpFile)
                         return false
                     }
+                    if (got > gotAtStart) attempt = 0
                     if (attempt >= 3) {
                         emitErr(req, id, "io", e.message ?: "io", false)
                         failCleanup(uri, tmpFile)

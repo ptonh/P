@@ -167,6 +167,8 @@ public class ChatActivity extends Activity {
     private NativeLan nativeLan;
     private NativeRelay nativeRelay;
     private AlertDialog settingsDialog;
+    private boolean chatLoaded = false;
+    private boolean settingsSaved = false;
     private android.widget.Button btnControlPerm;
     private android.widget.Button btnOverlayPerm;
     private String pendingPerm;
@@ -240,10 +242,14 @@ public class ChatActivity extends Activity {
 
         setupWebView();
 
-        if (chatUrl.length() > 0) {
+        boolean fromSettings = ACTION_SETTINGS.equals(getIntent().getAction());
+        try {
+            Logx.INSTANCE.add("启动：onCreate fromSettings=" + fromSettings);
+        } catch (Throwable ignored) {}
+        if (chatUrl.length() > 0 && !fromSettings) {
             loadChat();
         }
-        if (chatUrl.length() == 0 || ACTION_SETTINGS.equals(getIntent().getAction())) {
+        if (chatUrl.length() == 0 || fromSettings) {
             showSettings();
         }
     }
@@ -255,6 +261,9 @@ public class ChatActivity extends Activity {
         applyCallFlags(intent);
         capturePermIntent(intent);
         if (intent != null && ACTION_SETTINGS.equals(intent.getAction())) {
+            try {
+                Logx.INSTANCE.add("启动：onNewIntent 设置地址");
+            } catch (Throwable ignored) {}
             showSettings();
         }
     }
@@ -576,6 +585,7 @@ public class ChatActivity extends Activity {
 
     private void loadChat() {
         if (chatUrl.length() > 0) {
+            chatLoaded = true;
             webView.loadUrl(chatUrl);
         }
     }
@@ -792,12 +802,22 @@ public class ChatActivity extends Activity {
 
         final AlertDialog d = new AlertDialog.Builder(this)
                 .setTitle("设置")
-                .setView(box)
+                .setView(wrapScroll(box))
                 .setPositiveButton("保存", null)
                 .setNegativeButton("取消", null)
                 .setCancelable(!first)
                 .create();
         settingsDialog = d;
+
+        settingsSaved = false;
+        d.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            @Override
+            public void onDismiss(DialogInterface di) {
+                if (!settingsSaved && !chatLoaded && chatUrl.length() > 0) {
+                    loadChat();
+                }
+            }
+        });
 
         d.setOnShowListener(new DialogInterface.OnShowListener() {
             @Override
@@ -827,13 +847,18 @@ public class ChatActivity extends Activity {
                         boolean addrChanged = !chatUrl.equals(oldChat) || !videoUrl.equals(oldVideo);
                         boolean bgChanged = cbBg.isChecked() != oldBg;
                         if (bgChanged) applyBg();
+                        boolean neverLoaded = !chatLoaded && chatUrl.length() > 0;
+                        settingsSaved = true;
                         d.dismiss();
                         boolean busy = inCall
                                 || NativeShare.INSTANCE.isCapturing()
                                 || (nativeLan != null && nativeLan.isBusy())
                                 || (nativeRelay != null && nativeRelay.isBusy());
                         boolean willReload = false;
-                        if (!addrChanged) {
+                        if (neverLoaded) {
+                            willReload = true;
+                            loadChat();
+                        } else if (!addrChanged) {
                             toast("已保存");
                         } else if (!busy) {
                             willReload = true;
@@ -875,6 +900,12 @@ public class ChatActivity extends Activity {
             }
         });
         d.show();
+    }
+
+    private View wrapScroll(View v) {
+        ScrollView sv = new ScrollView(this);
+        sv.addView(v);
+        return sv;
     }
 
     // ---------------------------------------------------------------- 打不开时的页面

@@ -79,6 +79,7 @@ class ShareBridge(
     fun ready(): String {
         if (!originOk()) return badOrigin()
         pageReady = true
+        if (NativeShare.isCapturing()) main.post { NativeShare.stop("reload") }
         main.post {
             val batch = ArrayList<String>()
             synchronized(pendingEvents) {
